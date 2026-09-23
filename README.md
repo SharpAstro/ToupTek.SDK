@@ -69,12 +69,32 @@ so the ceiling is the sensor's row readout, not USB. 8-bit output runs the senso
 as 16-bit. Below 40 rows it is exposure-bound (1 ms caps at about 925 fps; 500 us and shorter reach
 1510).
 
-**Video mode can stall.** One 16-bit run delivered 163 frames and then nothing, every call still
-succeeding, and the camera stayed silent across close and reopen. `TOUPCAM_OPTION_DEVICE_RESET`
-("simulate a replug") recovers it: the camera re-enumerates under the same serial in about 0.6 s and
-takes frames again. The binding exposes that as the DAL's `ResetDevice()` (`CanResetDevice` is true),
-for a driver to call deliberately and then reconnect; it never fires one on its own. The single-frame
-trigger path the DAL uses has not been seen to stall.
+**The camera can stall, and a configuration change is what sets it off.** The transfer from the
+camera stops: every call still succeeds, no frame arrives, and with the no-packet timeout armed the SDK
+raises `TOUPCAM_EVENT_NOPACKETTIMEOUT` every ~0.5 s. Measured 2026-09-23:
+
+| Path | Runs | Stalls |
+|---|---|---|
+| Video, fresh open per run, resolution, bit depth and speed rotating | 80 | 2: once after 895 frames of a stream, once at the start |
+| Video, a sweep of the same changes | 48 | 3, all 8-bit |
+| Software trigger (the DAL's path), ROI changed every 5 frames | 400 at 8-bit, 400 at 16-bit | 0 |
+| Software trigger, bit depth flipped by a close and reopen every 20 frames | 600 | 1 frame never arrived, with NO event, and the next trigger worked |
+
+The stall at the start of a video run survived both a restart of the stream on the same handle and a
+close and reopen. `TOUPCAM_OPTION_DEVICE_RESET` ("simulate a replug") cleared it: the camera
+re-enumerated under the same serial and streamed again after 2.8 s (0.6 s on another occasion).
+
+What the binding does about it:
+
+- **Both timeouts are armed on every stream** (no-packet 1 s, no-frame 2 s), and either one, as well
+  as a trigger failure or a generic error, fails the exposure in progress. The SDK arms them against
+  when a frame is due, not wall time: three 5 s triggered exposures under tighter values (0.5 s and
+  1 s) raised nothing but the frame, and 3 s idle between triggers raised nothing.
+- **The reset is exposed as the DAL's `ResetDevice()`** (`CanResetDevice` is true), and never fired
+  from here. TianWen's DAL camera driver gives up a frame the camera never delivers at a deadline, and
+  resets the camera before the next exposure after two losses in a row, then finds it again and
+  restores its gain, offset, white balance and cooler. A lost trigger with no event can only be caught
+  by that deadline, which is why it lives in the driver rather than here.
 
 ## How capture works
 

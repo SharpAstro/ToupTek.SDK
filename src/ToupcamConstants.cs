@@ -33,6 +33,7 @@ internal static class ToupcamConstants
 
     // ---- Options (Toupcam_put_Option / Toupcam_get_Option) ----
 
+    internal const uint OPTION_NOFRAME_TIMEOUT = 0x01;
     internal const uint OPTION_RAW = 0x04;
     internal const uint OPTION_BITDEPTH = 0x06;
     internal const uint OPTION_FAN = 0x07;
@@ -46,6 +47,7 @@ internal static class ToupcamConstants
     internal const uint OPTION_TEC_VOLTAGE_MAX = 0x21;
     internal const uint OPTION_DEVICE_RESET = 0x22;
     internal const uint OPTION_UPSIDE_DOWN = 0x23;
+    internal const uint OPTION_NOPACKET_TIMEOUT = 0x2b;
     internal const uint OPTION_HEAT_MAX = 0x36;
     internal const uint OPTION_HEAT = 0x37;
     internal const uint OPTION_TECTARGET_RANGE = 0x6d;
@@ -88,6 +90,24 @@ internal static class ToupcamConstants
     internal const uint EVENT_ERROR = 0x0080;
     internal const uint EVENT_DISCONNECTED = 0x0081;
     internal const uint EVENT_NOFRAMETIMEOUT = 0x0082;
+    internal const uint EVENT_NOPACKETTIMEOUT = 0x0085;
+
+    /// <summary>
+    /// The no-frame and no-packet timeouts armed on every stream, in milliseconds.
+    /// </summary>
+    /// <remarks>
+    /// Both are off by default, which is why <see cref="EVENT_NOFRAMETIMEOUT"/> was handled and could
+    /// never arrive. The SDK arms them against when a frame is DUE, not against wall time: measured on
+    /// a G3M678M 2026-09-23, three 5 s triggered exposures under a 500 ms no-packet and a 1000 ms
+    /// no-frame timeout raised nothing but the frame itself, and 3 s idle between triggers raised
+    /// nothing at all. So a long exposure cannot trip them; a stalled transfer does, as
+    /// <see cref="EVENT_NOPACKETTIMEOUT"/> every ~0.5 s. The values are the SDK minimums doubled
+    /// (<c>TOUPCAM_NOPACKET_TIMEOUT_MIN</c> and <c>TOUPCAM_NOFRAME_TIMEOUT_MIN</c> are both 500).
+    /// </remarks>
+    internal const int NOPACKET_TIMEOUT_MS = 1000;
+
+    /// <inheritdoc cref="NOPACKET_TIMEOUT_MS"/>
+    internal const int NOFRAME_TIMEOUT_MS = 2000;
 
     /// <summary><c>Toupcam_ST4PlusGuide</c> direction that stops a running pulse.</summary>
     internal const uint ST4_STOP = 4;
