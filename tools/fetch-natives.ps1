@@ -9,8 +9,8 @@
 
     lib/<rid>/ is named by .NET runtime identifier, which is what the csproj maps from. Two vendor
     layouts are renamed on the way:
-      - linux/arm64 ships glibc and musl builds side by side; they land as linux-arm64 and
-        linux-musl-arm64, the RIDs .NET uses for those two C libraries.
+      - linux/arm64 ships glibc and musl builds side by side; only glibc is taken, as linux-arm64
+        (a Raspberry Pi runs glibc). win/x86, linux/x86 and the musl build are skipped as unused.
       - linux/armhf is the RID linux-arm. linux/armel (soft-float ARMv5) has no .NET RID and is skipped.
     The macOS dylib is a universal binary (x86_64 + arm64), so it lands once, as lib/osx.
 
@@ -33,12 +33,9 @@ if (-not $Zip) {
 $root = Split-Path -Parent $PSScriptRoot
 $map = [ordered]@{
     'win/x64/toupcam.dll'             = 'lib/win-x64/toupcam.dll'
-    'win/x86/toupcam.dll'             = 'lib/win-x86/toupcam.dll'
     'win/arm64/toupcam.dll'           = 'lib/win-arm64/toupcam.dll'
     'linux/x64/libtoupcam.so'         = 'lib/linux-x64/libtoupcam.so'
-    'linux/x86/libtoupcam.so'         = 'lib/linux-x86/libtoupcam.so'
     'linux/arm64/glibc/libtoupcam.so' = 'lib/linux-arm64/libtoupcam.so'
-    'linux/arm64/musl/libtoupcam.so'  = 'lib/linux-musl-arm64/libtoupcam.so'
     'linux/armhf/libtoupcam.so'       = 'lib/linux-arm/libtoupcam.so'
     'mac/libtoupcam.dylib'            = 'lib/osx/libtoupcam.dylib'
     'linux/udev/99-toupcam.rules'     = 'lib/udev/99-toupcam.rules'
