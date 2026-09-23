@@ -165,8 +165,9 @@ internal sealed unsafe partial class ToupcamSession
     /// <remarks>
     /// Measured on the G3M678M: a camera that had stopped delivering frames (a video stream that ran
     /// 163 frames and stopped, every call still succeeding, and stayed stopped across close and
-    /// reopen) delivered again about eight seconds after this, with no cable touched. Every setting is
-    /// back at the camera's default afterwards, so the caller re-opens and re-applies.
+    /// reopen) delivered again after this, with no cable touched: re-enumerated in 0.6 s once, streaming
+    /// again in 2.8 s another time. Every setting is back at the camera's default afterwards, so the
+    /// caller re-opens and re-applies.
     /// </remarks>
     internal static int Reset(string key)
     {
@@ -212,6 +213,9 @@ internal sealed unsafe partial class ToupcamSession
         Bits16 = MaxBitDepth > 8 && Succeeded(Api.PutOption(Handle, OPTION_BITDEPTH, 1));
         _ = Api.PutOption(Handle, OPTION_ZERO_PADDING, 0);
         _ = Api.PutAutoExpoEnable(Handle, 0);
+        // Best effort: a model without them still takes frames, it just cannot report a stalled one.
+        _ = Api.PutOption(Handle, OPTION_NOPACKET_TIMEOUT, NOPACKET_TIMEOUT_MS);
+        _ = Api.PutOption(Handle, OPTION_NOFRAME_TIMEOUT, NOFRAME_TIMEOUT_MS);
         if (!Succeeded(Api.PutOption(Handle, OPTION_TRIGGER, TRIGGER_SOFTWARE)))
         {
             return false;
@@ -405,7 +409,9 @@ internal sealed unsafe partial class ToupcamSession
                 Volatile.Write(ref _disconnected, 1);
                 Volatile.Write(ref _state, StateFailed);
                 break;
-            case EVENT_TRIGGERFAIL or EVENT_ERROR or EVENT_NOFRAMETIMEOUT:
+            // NOPACKETTIMEOUT is what a stalled transfer raises (the stream stops delivering USB
+            // packets); the DAL driver counts the failure and, if it repeats, resets the camera.
+            case EVENT_TRIGGERFAIL or EVENT_ERROR or EVENT_NOFRAMETIMEOUT or EVENT_NOPACKETTIMEOUT:
                 _ = Interlocked.CompareExchange(ref _state, StateFailed, StateExposing);
                 break;
         }

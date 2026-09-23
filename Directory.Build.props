@@ -11,7 +11,7 @@
          SDK, unlike PlayerOne.SDK: ToupTek numbers its SDK 60.32549.20260908 (a build counter and a
          date), which is no use as a MAJOR.MINOR, and eleven rebadged libraries share that one line.
          The SDK version the natives came from is stated in the README instead. -->
-    <VersionMajorMinor>1.0</VersionMajorMinor>
+    <VersionMajorMinor>1.1</VersionMajorMinor>
     <VersionPrefix Condition="'$(VersionPrefix)' == ''">$(VersionMajorMinor).0</VersionPrefix>
   </PropertyGroup>
 
