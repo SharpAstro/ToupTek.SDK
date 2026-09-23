@@ -44,6 +44,7 @@ internal static class ToupcamConstants
     internal const uint OPTION_CG = 0x19;
     internal const uint OPTION_TEC_VOLTAGE = 0x20;
     internal const uint OPTION_TEC_VOLTAGE_MAX = 0x21;
+    internal const uint OPTION_DEVICE_RESET = 0x22;
     internal const uint OPTION_UPSIDE_DOWN = 0x23;
     internal const uint OPTION_HEAT_MAX = 0x36;
     internal const uint OPTION_HEAT = 0x37;

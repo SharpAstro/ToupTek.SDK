@@ -1,0 +1,88 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+    
+env:
+  # The MAJOR.MINOR is not here: it lives in Directory.Build.props (VersionMajorMinor) and the build
+  # job reads it back, so it cannot drift from what the package declares and a local dotnet pack
+  # stamps the same line CI does. The sibling repos learned this the hard way: with no version in
+  # the csproj a local pack produced the SDK default 1.0.0 against a package whose real line was
+  # already several majors on.
+  VERSION_REV: ${{ github.run_attempt }}
+  BUILD_CONF: Release
+  # The build job CAPTURES a dotnet invocation's stdout to resolve the version, so the SDK's
+  # first-run banner must not be able to land in it.
+  DOTNET_NOLOGO: 1
+  # There used to be a VERSION_SUFFIX: +${{ github.sha }} here, referenced by the build step as
+  # ${VERSION_HASH}. The names never matched, so it expanded to nothing and every package published
+  # so far has a clean version. Removing the dead pair rather than connecting it keeps it that way:
+  # a +sha makes the version SemVer 2.0.0, which NuGet flags (NU5105) and which is not part of
+  # package identity anyway, and ContinuousIntegrationBuild plus SourceLink already record the exact
+  # commit. Same call as FC.SDK made on the identical dangling pair.
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+    - name: Resolve version prefix
+      # Read the major.minor back from the one place it is written (Directory.Build.props) instead of
+      # restating it here. -getProperty only EVALUATES the file: nothing is built and no restore is
+      # needed, so this can run before restore. The value is CAPTURED, so nothing else may print to
+      # stdout: DOTNET_NOLOGO (workflow env) keeps the SDK first-run banner out, and the shape check
+      # makes anything unexpected, or a renamed property, fail the run rather than quietly publishing
+      # the package as ".<run>".
+      run: |
+        MM="$(dotnet msbuild Directory.Build.props -getProperty:VersionMajorMinor -nologo)"
+        case "$MM" in
+          [0-9]*.[0-9]*) ;;
+          *) echo "::error::VersionMajorMinor did not resolve from Directory.Build.props (got '$MM')"; exit 1 ;;
+        esac
+        echo "VERSION_PREFIX=${MM}.${{ github.run_number }}" >> "$GITHUB_ENV"
+    - name: Restore dependencies
+      run: dotnet restore
+    - name: Build
+      run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: nuget-packages
+        path: '**/*.nupkg'
+        retention-days: 5
+  
+  publish:
+    runs-on: ubuntu-latest
+    needs: build
+    # Gated, because it was not, and a PULL REQUEST published a real package. The workflow triggers
+    # on pull_request as well as push, and with no condition here every PR run reached the push
+    # step: PR #4 put ZWOptical.SDK 4.3.691 on nuget.org from an unmerged branch, and the log said
+    # so plainly. That is not recoverable the way a bad commit is, since nuget.org allows unlisting
+    # but never deletion, and the version number is spent either way. It also means an unreviewed
+    # branch, from anyone who can open a PR, is what gets published.
+    #
+    # This is the condition the org pattern doc prescribes (.github/docs/dotnet-ci-pattern.md,
+    # "publish-nuget"). Both halves are needed: the event test alone would still let a push to some
+    # other branch publish, and the ref test alone would still let a PR TARGETING main publish,
+    # which is exactly the case that fired in ZWOptical.SDK.
+    #
+    # It is here from the first commit rather than added after an incident, which is the whole
+    # reason the incident above is written down. On a PR this job reports as skipped, not passing.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+    - name: Download NuGet packages
+      uses: actions/download-artifact@v8
+      with:
+        name: nuget-packages
+    - name: Push NuGet package
+      run: dotnet nuget push **/*.nupkg -s nuget.org -k ${{ secrets.NUGET_API_KEY }}

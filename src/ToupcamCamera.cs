@@ -97,6 +97,18 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
 
     public bool Close() => _key is not null && ToupcamSession.Release(_key);
 
+    /// <summary>True whenever the library is loaded: <c>TOUPCAM_OPTION_DEVICE_RESET</c> is a general
+    /// option of the SDK, not a model capability.</summary>
+    public bool CanResetDevice => _entry?.Brand.Api is not null;
+
+    /// <summary>
+    /// Resets the camera as a replug would. The camera must be open (the reset is issued through its
+    /// handle), and afterwards it is CLOSED and at its power-on defaults, so the caller enumerates and
+    /// opens it again; see <see cref="INativeDeviceInfo.ResetDevice"/>.
+    /// </summary>
+    public CMOSErrorCode ResetDevice()
+        => _key is not null && Session is not null ? ToDALError(ToupcamSession.Reset(_key)) : CMOSErrorCode.CameraClosed;
+
     // ---- What the sensor is ---------------------------------------------------------------------
 
     public int MaxWidth => Model.Resolutions.Length > 0 ? Model.Resolutions[0].Width : 0;

@@ -11,6 +11,7 @@
 	<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
 	<PackageId>ToupTek.SDK</PackageId>
 	<PackageReadmeFile>README.md</PackageReadmeFile>
+	<PackageLicenseFile>LICENSE</PackageLicenseFile>
 	<PackageTags>Astronomy,ToupTek,Toupcam,Altair,Omegon,Camera</PackageTags>
 	<RepositoryUrl>https://github.com/SharpAstro/ToupTek.SDK</RepositoryUrl>
 	<Description>Implements accessing ToupTek cameras, and the rebadged families on the same SDK, using .NET</Description>
@@ -26,12 +27,14 @@
 	<Compile Remove="reference/**" />
 	<None Remove="reference/**" />
 	<None Include="README.md" PackagePath="" Pack="true" />
+	<None Include="LICENSE" PackagePath="" Pack="true" />
   </ItemGroup>
 
   <!--
-    One item per RID the vendor ships, and only when tools/fetch-natives.ps1 has unpacked it: lib/ is
-    untracked, so a clone that has not fetched builds a managed-only assembly rather than failing, and
-    the device source then reports the library absent, exactly as on a machine with no camera SDK.
+    One item per RID the vendor ships. lib/ is committed (tools/fetch-natives.ps1 fills it from a vendor
+    zip); each item is still conditional on its file existing, so a partial drop packs what it has
+    rather than failing, and a consumer on a missing RID sees the library absent, exactly as on a
+    machine with no camera SDK. The package is about 82 MB compressed, against nuget.org's 250.
 
     The macOS dylib is a universal binary (x86_64 + arm64), so both Mac RIDs take the same file.
   -->
@@ -77,7 +80,7 @@
 	<ProjectReference Include="..\TianWen.DAL\TianWen.DAL.csproj" />
   </ItemGroup>
   <ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\TianWen.DAL\TianWen.DAL.csproj')">
-	<PackageReference Include="TianWen.DAL" Version="3.1.*" />
+	<PackageReference Include="TianWen.DAL" Version="3.2.*" />
   </ItemGroup>
 
 </Project>

@@ -51,6 +51,31 @@ vendor driver install.
   own id is a USB device path, which changes with the port.
 - No sensor temperature on this body; the SDK answers `E_NOTIMPL` and the binding reports that.
 
+## Frame rate, and recovering a stalled camera
+
+Measured in video mode (`TOUPCAM_OPTION_TRIGGER = 0`, RAW, speed 2, the default), counting delivered
+frames over 3 s, no frames dropped:
+
+| Rows (width 3840) | 8-bit fps | 16-bit fps |
+|---|---|---|
+| 2160 | 47 | 23 |
+| 1080 | 93 | 45 |
+| 256 | 362 | 177 |
+| 128 | 658 | 323 |
+| **40** | **1510** | **740** |
+
+**Height is what counts, width is not**: at 40 rows the rate is identical at 3840, 1920 and 960 wide,
+so the ceiling is the sensor's row readout, not USB. 8-bit output runs the sensor about twice as fast
+as 16-bit. Below 40 rows it is exposure-bound (1 ms caps at about 925 fps; 500 us and shorter reach
+1510).
+
+**Video mode can stall.** One 16-bit run delivered 163 frames and then nothing, every call still
+succeeding, and the camera stayed silent across close and reopen. `TOUPCAM_OPTION_DEVICE_RESET`
+("simulate a replug") recovers it: the camera re-enumerates under the same serial in about 0.6 s and
+takes frames again. The binding exposes that as the DAL's `ResetDevice()` (`CanResetDevice` is true),
+for a driver to call deliberately and then reconnect; it never fires one on its own. The single-frame
+trigger path the DAL uses has not been seen to stall.
+
 ## How capture works
 
 Software trigger over pull mode: the camera starts in `TOUPCAM_OPTION_TRIGGER = 1`, so it produces

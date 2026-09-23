@@ -159,6 +159,31 @@ internal sealed unsafe partial class ToupcamSession
     }
 
     /// <summary>
+    /// Resets the camera as a replug would (<c>TOUPCAM_OPTION_DEVICE_RESET</c>) and forgets the session,
+    /// whatever its reference count: the handle is dead once the device drops off the bus.
+    /// </summary>
+    /// <remarks>
+    /// Measured on the G3M678M: a camera that had stopped delivering frames (a video stream that ran
+    /// 163 frames and stopped, every call still succeeding, and stayed stopped across close and
+    /// reopen) delivered again about eight seconds after this, with no cable touched. Every setting is
+    /// back at the camera's default afterwards, so the caller re-opens and re-applies.
+    /// </remarks>
+    internal static int Reset(string key)
+    {
+        lock (RegistryLock)
+        {
+            if (!Sessions.Remove(key, out var session))
+            {
+                return E_UNEXPECTED;
+            }
+
+            var hr = session.Api.PutOption(session.Handle, OPTION_DEVICE_RESET, 1);
+            session.Shutdown();
+            return hr;
+        }
+    }
+
+    /// <summary>
     /// Configures the stream and starts it in trigger mode.
     /// </summary>
     /// <remarks>
