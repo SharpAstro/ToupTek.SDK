@@ -1,0 +1,7 @@
+# Deliberately NOT the stock Visual Studio .gitignore. That one ignores [Aa][Rr][Mm]64/ as a build
+# output folder, which in PlayerOne.SDK silently swallowed the vendored arm64 natives.
+bin/
+obj/
+.vs/
+*.user
+*.suo

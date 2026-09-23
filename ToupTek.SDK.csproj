@@ -1,0 +1,83 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	<TargetFramework>net10.0</TargetFramework>
+	<Nullable>enable</Nullable>
+	<RootNamespace>ToupTek.SDK</RootNamespace>
+	<AssemblyName>ToupTek.SDK</AssemblyName>
+	<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	<IsAotCompatible>true</IsAotCompatible>
+	<DebugType>embedded</DebugType>
+	<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+	<PackageId>ToupTek.SDK</PackageId>
+	<PackageReadmeFile>README.md</PackageReadmeFile>
+	<PackageTags>Astronomy,ToupTek,Toupcam,Altair,Omegon,Camera</PackageTags>
+	<RepositoryUrl>https://github.com/SharpAstro/ToupTek.SDK</RepositoryUrl>
+	<Description>Implements accessing ToupTek cameras, and the rebadged families on the same SDK, using .NET</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<!--
+	  reference/ holds the VENDOR's C# binding (and its manual), kept for reading and never compiled,
+	  as PlayerOne.SDK keeps Player One's. Ours is written against include/toupcam.h instead: the
+	  vendor file is not nullable-aware, is not AOT-clean (Marshal.PtrToStructure(Type)), binds ONE
+	  library name so it cannot reach the rebadged brands, and does not implement ICMOSNativeInterface.
+	-->
+	<Compile Remove="reference/**" />
+	<None Remove="reference/**" />
+	<None Include="README.md" PackagePath="" Pack="true" />
+  </ItemGroup>
+
+  <!--
+    One item per RID the vendor ships, and only when tools/fetch-natives.ps1 has unpacked it: lib/ is
+    untracked, so a clone that has not fetched builds a managed-only assembly rather than failing, and
+    the device source then reports the library absent, exactly as on a machine with no camera SDK.
+
+    The macOS dylib is a universal binary (x86_64 + arm64), so both Mac RIDs take the same file.
+  -->
+  <ItemGroup>
+	<None Include="lib/win-x64/toupcam.dll" Condition="Exists('lib/win-x64/toupcam.dll')" PackagePath="runtimes/win-x64/native" Pack="true" />
+	<None Include="lib/win-x86/toupcam.dll" Condition="Exists('lib/win-x86/toupcam.dll')" PackagePath="runtimes/win-x86/native" Pack="true" />
+	<None Include="lib/win-arm64/toupcam.dll" Condition="Exists('lib/win-arm64/toupcam.dll')" PackagePath="runtimes/win-arm64/native" Pack="true" />
+	<None Include="lib/linux-x64/libtoupcam.so" Condition="Exists('lib/linux-x64/libtoupcam.so')" PackagePath="runtimes/linux-x64/native" Pack="true" />
+	<None Include="lib/linux-x86/libtoupcam.so" Condition="Exists('lib/linux-x86/libtoupcam.so')" PackagePath="runtimes/linux-x86/native" Pack="true" />
+	<None Include="lib/linux-arm64/libtoupcam.so" Condition="Exists('lib/linux-arm64/libtoupcam.so')" PackagePath="runtimes/linux-arm64/native" Pack="true" />
+	<None Include="lib/linux-musl-arm64/libtoupcam.so" Condition="Exists('lib/linux-musl-arm64/libtoupcam.so')" PackagePath="runtimes/linux-musl-arm64/native" Pack="true" />
+	<None Include="lib/linux-arm/libtoupcam.so" Condition="Exists('lib/linux-arm/libtoupcam.so')" PackagePath="runtimes/linux-arm/native" Pack="true" />
+	<!-- Listed twice on purpose, one PackagePath per Mac RID, the file being universal. -->
+	<None Include="lib/osx/libtoupcam.dylib" Condition="Exists('lib/osx/libtoupcam.dylib')" PackagePath="runtimes/osx-x64/native;runtimes/osx-arm64/native" Pack="true" />
+  </ItemGroup>
+
+  <!--
+    The PackagePath entries above serve a NuGet package and ONLY it: a consumer taking this project by
+    ProjectReference, which every SharpAstro consumer does on a dev box because UseLocalSiblings
+    self-enables, gets no runtimes/ resolution, and a missing DllImport target looks exactly like no
+    camera being plugged in (the gap ZWOptical.SDK shipped with for a while). So the native for the
+    build's own RID is also copied beside the consumer's binary, where the runtime probes.
+  -->
+  <PropertyGroup>
+	<_ToupcamRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_ToupcamRid>
+	<_ToupcamRid Condition="'$(_ToupcamRid)' == ''">$(NETCoreSdkPortableRuntimeIdentifier)</_ToupcamRid>
+	<_ToupcamRid Condition="'$(_ToupcamRid)' == ''">unknown</_ToupcamRid>
+	<_ToupcamDir>$(_ToupcamRid)</_ToupcamDir>
+	<_ToupcamDir Condition="$(_ToupcamRid.StartsWith('osx-'))">osx</_ToupcamDir>
+	<_ToupcamFile Condition="$(_ToupcamRid.StartsWith('win-'))">toupcam.dll</_ToupcamFile>
+	<_ToupcamFile Condition="$(_ToupcamRid.StartsWith('linux-'))">libtoupcam.so</_ToupcamFile>
+	<_ToupcamFile Condition="$(_ToupcamRid.StartsWith('osx-'))">libtoupcam.dylib</_ToupcamFile>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_ToupcamFile)' != ''">
+	<None Update="lib/$(_ToupcamDir)/$(_ToupcamFile)" Link="$(_ToupcamFile)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- TianWen.DAL from the sibling checkout when there is one, exactly as PlayerOne.SDK does and for
+       the same reason: an unconditional PackageReference puts a second TianWen.DAL beside the
+       sibling's in any consumer building both from source, and the compiler refuses them (CS1704). -->
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)..\TianWen.DAL\TianWen.DAL.csproj')">
+	<ProjectReference Include="..\TianWen.DAL\TianWen.DAL.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\TianWen.DAL\TianWen.DAL.csproj')">
+	<PackageReference Include="TianWen.DAL" Version="3.1.*" />
+  </ItemGroup>
+
+</Project>

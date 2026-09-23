@@ -1,0 +1,18 @@
+<Project>
+
+  <!-- Chains to a consumer's props rather than shadowing it, as PlayerOne.SDK does. -->
+  <PropertyGroup>
+    <ParentBuildProps>$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))</ParentBuildProps>
+  </PropertyGroup>
+  <Import Project="$(ParentBuildProps)" Condition="Exists('$(ParentBuildProps)')" />
+
+  <PropertyGroup>
+    <!-- THE version for this repo, and the only place it is written. It does NOT track the vendor
+         SDK, unlike PlayerOne.SDK: ToupTek numbers its SDK 60.32549.20260908 (a build counter and a
+         date), which is no use as a MAJOR.MINOR, and eleven rebadged libraries share that one line.
+         The SDK version the natives came from is stated in the README instead. -->
+    <VersionMajorMinor>1.0</VersionMajorMinor>
+    <VersionPrefix Condition="'$(VersionPrefix)' == ''">$(VersionMajorMinor).0</VersionPrefix>
+  </PropertyGroup>
+
+</Project>
