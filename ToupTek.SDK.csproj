@@ -31,21 +31,20 @@
   </ItemGroup>
 
   <!--
-    One item per RID the vendor ships. lib/ is committed (tools/fetch-natives.ps1 fills it from a vendor
+    One item per RID shipped here, which is NOT every RID the vendor ships: win-x86, linux-x86 and
+    linux-musl-arm64 were dropped on 2026-09-23 as unused (a Raspberry Pi runs glibc, so it is
+    linux-arm64 or linux-arm, both kept); tools/fetch-natives.ps1 lists the ones taken. lib/ is committed (tools/fetch-natives.ps1 fills it from a vendor
     zip); each item is still conditional on its file existing, so a partial drop packs what it has
     rather than failing, and a consumer on a missing RID sees the library absent, exactly as on a
-    machine with no camera SDK. The package is about 82 MB compressed, against nuget.org's 250.
+    machine with no camera SDK.
 
     The macOS dylib is a universal binary (x86_64 + arm64), so both Mac RIDs take the same file.
   -->
   <ItemGroup>
 	<None Include="lib/win-x64/toupcam.dll" Condition="Exists('lib/win-x64/toupcam.dll')" PackagePath="runtimes/win-x64/native" Pack="true" />
-	<None Include="lib/win-x86/toupcam.dll" Condition="Exists('lib/win-x86/toupcam.dll')" PackagePath="runtimes/win-x86/native" Pack="true" />
 	<None Include="lib/win-arm64/toupcam.dll" Condition="Exists('lib/win-arm64/toupcam.dll')" PackagePath="runtimes/win-arm64/native" Pack="true" />
 	<None Include="lib/linux-x64/libtoupcam.so" Condition="Exists('lib/linux-x64/libtoupcam.so')" PackagePath="runtimes/linux-x64/native" Pack="true" />
-	<None Include="lib/linux-x86/libtoupcam.so" Condition="Exists('lib/linux-x86/libtoupcam.so')" PackagePath="runtimes/linux-x86/native" Pack="true" />
 	<None Include="lib/linux-arm64/libtoupcam.so" Condition="Exists('lib/linux-arm64/libtoupcam.so')" PackagePath="runtimes/linux-arm64/native" Pack="true" />
-	<None Include="lib/linux-musl-arm64/libtoupcam.so" Condition="Exists('lib/linux-musl-arm64/libtoupcam.so')" PackagePath="runtimes/linux-musl-arm64/native" Pack="true" />
 	<None Include="lib/linux-arm/libtoupcam.so" Condition="Exists('lib/linux-arm/libtoupcam.so')" PackagePath="runtimes/linux-arm/native" Pack="true" />
 	<!-- Listed twice on purpose, one PackagePath per Mac RID, the file being universal. -->
 	<None Include="lib/osx/libtoupcam.dylib" Condition="Exists('lib/osx/libtoupcam.dylib')" PackagePath="runtimes/osx-x64/native;runtimes/osx-arm64/native" Pack="true" />
