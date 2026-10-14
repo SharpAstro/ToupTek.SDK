@@ -42,6 +42,9 @@ internal sealed unsafe partial class ToupcamSession
     private static readonly Lock RegistryLock = new Lock();
     private static readonly Dictionary<string, ToupcamSession> Sessions = new Dictionary<string, ToupcamSession>();
 
+    // Libraries through which a camera was reset and not yet opened again; see Acquire.
+    private static readonly HashSet<ToupcamBrand> ResetSinceOpen = new HashSet<ToupcamBrand>();
+
     private readonly GCHandle _self;
     private int _references;
     private int _state = StateIdle;
@@ -102,6 +105,15 @@ internal sealed unsafe partial class ToupcamSession
     }
 
     /// <summary>Opens the camera, or takes another reference to it if it is already open.</summary>
+    /// <remarks>
+    /// <b>The first open after a <see cref="Reset"/> is thrown away.</b> Measured on the G3M678M: the
+    /// first handle opened after <c>TOUPCAM_OPTION_DEVICE_RESET</c> streams good pixels at the full rate
+    /// but reads garbage frame info (the sequence number and timestamp cycle through five fixed values),
+    /// for as long as that handle lives; closing it and opening again gives a handle whose sequence
+    /// counts from where the camera's own count is. So the open after a reset through a library is made
+    /// twice, which costs about a second, once (measured: open after the reset in 2.2 to 2.4 s rather
+    /// than 1.3 to 1.5).
+    /// </remarks>
     internal static bool Acquire(ToupcamDeviceEntry entry)
     {
         var key = KeyOf(entry);
@@ -129,6 +141,23 @@ internal sealed unsafe partial class ToupcamSession
             {
                 session.Shutdown();
                 return false;
+            }
+
+            if (ResetSinceOpen.Remove(entry.Brand))
+            {
+                session.Shutdown();
+                handle = ToupcamNativeText.WithPlatformString(entry.Id, id => api.Open((void*)id));
+                if (handle == 0)
+                {
+                    return false;
+                }
+
+                session = new ToupcamSession(entry, api, handle);
+                if (!session.Start())
+                {
+                    session.Shutdown();
+                    return false;
+                }
             }
 
             session._references = 1;
@@ -180,6 +209,11 @@ internal sealed unsafe partial class ToupcamSession
 
             var hr = session.Api.PutOption(session.Handle, OPTION_DEVICE_RESET, 1);
             session.Shutdown();
+            if (Succeeded(hr))
+            {
+                _ = ResetSinceOpen.Add(session.Entry.Brand);
+            }
+
             return hr;
         }
     }
