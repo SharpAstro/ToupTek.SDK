@@ -247,14 +247,15 @@ internal static class Program
         var first = Expose(camera);
         var second = Expose(camera);
         var agree = Math.Abs(first.Bright - second.Bright) <= 0.15 * second.Bright + 1;
-        // Even capped, the hot pixels integrate: the brightest 0.1 percent of a 200 ms frame reads far
-        // above a 5 ms one. Where it does not, the comparison cannot tell a leftover frame from a real
-        // one, and says so.
+        // At the highest gain the brightest 0.1 percent (read noise and hot pixels) reads far above the
+        // stream's at 2252, so a leftover stream frame cannot pass for a single exposure. Where it does
+        // not, the comparison cannot tell them apart, and says so rather than passing.
         var telling = second.Bright > 2 * stream.Bright + 2;
-        var passed = stream.Stall is null && first.Ok && second.Ok && agree;
-        Console.WriteLine($"single exposures after a stream ({stream.Frames} frames, brightest 0.1 % at {stream.Bright:F1} ADU, stop {stream.StopCode} in {stream.StopMs:F0} ms): "
+        var passed = first.Ok && second.Ok && agree && telling;
+        Console.WriteLine($"single exposures after a stream ({stream.Frames} frames, brightest 0.1 % at {stream.Bright:F1} ADU, "
+            + $"{(stream.Stall is null ? "" : "the stream STALLED" + Describe(stream) + ", ")}stop {stream.StopCode} in {stream.StopMs:F0} ms): "
             + $"first {first.What}, second {second.What}; {(agree ? "they agree" : "they DIFFER, so the first was not its own exposure")}"
-            + $"{(telling ? "" : " (inconclusive: 200 ms reads like 5 ms here)")}  {(passed ? "PASS" : "FAIL")}");
+            + $"{(telling ? "" : "; INCONCLUSIVE, the exposures read like the stream here")}  {(passed ? "PASS" : "FAIL")}");
         return passed;
     }
 
@@ -289,10 +290,16 @@ internal static class Program
     // ---- Pan -----------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Moves the window by 64 px while the stream runs, ten times back and forth, and measures whether
-    /// the picture moved by that much, whether the stream paused (a restart shows as a gap of many
-    /// frame times) and whether it stalled.
+    /// Moves the window by 64 px while the stream runs, ten times back and forth. A pan holds when the
+    /// picture moved by exactly that much, the camera lost at most one frame to it (its own frame
+    /// count, through <c>TryGetDroppedFrames</c>; a restart would lose the 40 or so of its 200 ms),
+    /// and the stream did not stall.
     /// </summary>
+    /// <remarks>
+    /// How long <c>SetStartPosition</c> blocks its caller, and the longest wait between two frames as
+    /// the reader saw them, are printed but not judged: the stream runs on while the call blocks, its
+    /// frames queuing in the ring, so the reader's gap measures the call rather than the camera.
+    /// </remarks>
     private static bool PanArm()
     {
         Console.WriteLine();
@@ -311,6 +318,7 @@ internal static class Program
             for (var pan = 1; pan <= 10; pan++)
             {
                 var before = Average(camera, buffer, frameBytes, 16);
+                _ = camera.TryGetDroppedFrames(out var droppedBefore);
                 var dx = pan % 2 == 1 ? 64 : -64;
                 var calledAt = clock.Elapsed;
                 var code = camera.SetStartPosition(x + dx, RoiY);
@@ -331,12 +339,13 @@ internal static class Program
                 var firstGap = arrivals.Count > 0 ? arrivals[0] - calledAt.TotalMilliseconds : double.NaN;
                 var maxGap = gaps.Count > 0 ? Math.Max(gaps.Max(), firstGap) : double.NaN;
                 var median = gaps.Count > 0 ? gaps.Order().ElementAt(gaps.Count / 2) : double.NaN;
-                _ = camera.TryGetDroppedFrames(out var dropped);
+                var counted = camera.TryGetDroppedFrames(out var droppedAfter);
+                var lost = droppedAfter - droppedBefore;
                 var moved = shift == dx;
-                ok &= after is null && moved && maxGap < 50;
-                Console.WriteLine($"pan {pan}: to ({x}, {RoiY}) by {dx,3}: call {callMs:F1} ms; {arrivals.Count} frames in the next 500 ms, first after {firstGap:F1} ms, "
-                    + $"longest gap {maxGap:F1} ms (median {median:F1}); picture moved {shift,4} px (match contrast {contrast:F2}); "
-                    + $"dropped so far {dropped}{(after is null ? "" : "; STREAM ENDED " + after)}");
+                ok &= after is null && moved && counted && lost <= 1;
+                Console.WriteLine($"pan {pan}: to ({x}, {RoiY}) by {dx,3}: picture moved {shift,4} px (match contrast {contrast:F2}); camera lost {(counted ? lost.ToString(CultureInfo.InvariantCulture) : "n/a")} frame(s); "
+                    + $"call {callMs:F1} ms; reader: {arrivals.Count} frames in the next 500 ms, first after {firstGap:F1} ms, longest gap {maxGap:F1} ms (median {median:F1})"
+                    + $"{(after is null ? "" : "; STREAM ENDED " + after)}");
                 if (after is not null)
                 {
                     break;
@@ -344,8 +353,8 @@ internal static class Program
             }
 
             var stopped = camera.StopVideoCapture();
-            Console.WriteLine($"pan summary: {(ok ? "the window moves mid-stream with no restart and no stall" : "panning mid-stream does NOT hold")}; stop {stopped}");
-            return true;
+            Console.WriteLine($"pan summary: {(ok ? "the window moves mid-stream with no restart and no stall" : "panning mid-stream does NOT hold")}; stop {stopped}  {(ok ? "PASS" : "FAIL")}");
+            return ok;
         }
         finally
         {
