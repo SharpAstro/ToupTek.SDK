@@ -50,6 +50,7 @@ internal static class ToupcamConstants
     internal const uint OPTION_NOPACKET_TIMEOUT = 0x2b;
     internal const uint OPTION_HEAT_MAX = 0x36;
     internal const uint OPTION_HEAT = 0x37;
+    internal const uint OPTION_FLUSH = 0x3d;
     internal const uint OPTION_TECTARGET_RANGE = 0x6d;
     internal const uint OPTION_ZERO_PADDING = 0x78;
 
@@ -57,9 +58,35 @@ internal static class ToupcamConstants
     /// ADU scale (a bare n is a SATURATING add, 0x40 | n an unsaturated one that widens the data).</summary>
     internal const int BINNING_AVERAGE = 0x80;
 
+    /// <summary><c>TOUPCAM_OPTION_TRIGGER</c> value: video, the camera free-running at its readout
+    /// rate.</summary>
+    internal const int TRIGGER_VIDEO = 0;
+
     /// <summary><c>TOUPCAM_OPTION_TRIGGER</c> value: software (simulated) trigger, one frame per
     /// <c>Toupcam_Trigger</c>.</summary>
     internal const int TRIGGER_SOFTWARE = 1;
+
+    /// <summary><c>TOUPCAM_OPTION_FLUSH</c> value: a SOFT flush, discarding the frames cached in the
+    /// library and leaving the camera's own frame memory alone.</summary>
+    /// <remarks>
+    /// Not the hard flush (1, or 3 for both), which empties the camera's DDR: measured on the
+    /// G3M678M (a <c>TOUPCAM_FLAG_DDR</c> body) on 2026-10-15, a hard flush beside each switch into
+    /// and out of video mode stalled 12 of 20 streams of 30 to 60 s, whatever the thread priorities
+    /// and queue depths, while the vendor's own binding switching the same way without a flush streamed
+    /// 10 of 10 and the soft flush has stalled none (README, "Video").
+    /// </remarks>
+    internal const int FLUSH_SOFT = 2;
+
+    // ---- Frame info (ToupcamFrameInfoV3, the head of V4) ----
+
+    /// <summary><c>TOUPCAM_FRAMEINFO_FLAG_SEQ</c>: the frame info's <c>seq</c> is valid.</summary>
+    internal const uint FRAMEINFO_FLAG_SEQ = 0x00000001;
+
+    /// <summary>Byte offset of <c>flag</c> in <c>ToupcamFrameInfoV3</c> (after width and height).</summary>
+    internal const int FRAMEINFO_FLAG_OFFSET = 8;
+
+    /// <summary>Byte offset of <c>seq</c> in <c>ToupcamFrameInfoV3</c>.</summary>
+    internal const int FRAMEINFO_SEQ_OFFSET = 12;
 
     // ---- Model flags (ToupcamModelV2.flag, 64 bits) ----
 

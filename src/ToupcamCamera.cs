@@ -74,6 +74,11 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
     /// when closed.</summary>
     public int? RawBitsPerPixel => Session?.RawBitsPerPixel();
 
+    /// <summary>The frame rate the SDK itself measured over its last few seconds
+    /// (<c>Toupcam_get_FrameRate</c>), or null when closed or when it has none. A diagnostic beside the
+    /// DAL's members, for checking a stream's rate against the camera's own count.</summary>
+    public double? SdkFrameRate => Session?.FrameRate();
+
     private ToupcamSession? Session => _key is null ? null : ToupcamSession.Find(_key);
 
     // ---- Identity -------------------------------------------------------------------------------
@@ -266,9 +271,12 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
     // ---- Exposure -------------------------------------------------------------------------------
 
     /// <summary>Triggers one frame. <see cref="StartDarkExposure"/> is the same call: there is no
-    /// mechanical shutter, so a dark is made by capping the telescope, not by the driver.</summary>
+    /// mechanical shutter, so a dark is made by capping the telescope, not by the driver. Refused
+    /// (<see cref="CMOSErrorCode.VideoModeActive"/>) while a video stream runs.</summary>
     public CMOSErrorCode StartLightExposure()
-        => Session is { } session ? ToDALError(session.BeginExposure()) : CMOSErrorCode.CameraClosed;
+        => Session is not { } session ? CMOSErrorCode.CameraClosed
+            : session.IsStreaming ? CMOSErrorCode.VideoModeActive
+            : ToDALError(session.BeginExposure());
 
     /// <inheritdoc cref="StartLightExposure"/>
     public CMOSErrorCode StartDarkExposure() => StartLightExposure();
@@ -296,8 +304,13 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
         return Session is null ? CMOSErrorCode.CameraClosed : CMOSErrorCode.Success;
     }
 
+    /// <summary>Moves the window. While a video stream runs this is allowed only where
+    /// <see cref="CanPanRoiWhileStreaming"/> says so, and refused with
+    /// <see cref="CMOSErrorCode.VideoModeActive"/> otherwise.</summary>
     public CMOSErrorCode SetStartPosition(int startX, int startY)
-        => Session is { } session ? ToDALError(session.SetStart(startX, startY), CMOSErrorCode.InvalidSize) : CMOSErrorCode.CameraClosed;
+        => Session is not { } session ? CMOSErrorCode.CameraClosed
+            : session.IsStreaming && !CanPanRoiWhileStreaming ? CMOSErrorCode.VideoModeActive
+            : ToDALError(session.SetStart(startX, startY), CMOSErrorCode.InvalidSize);
 
     /// <summary>The frame as the SDK WILL deliver it (<c>get_FinalSize</c>), so a caller comparing this
     /// with what it asked for sees any rounding the SDK applied rather than its own request echoed.</summary>
@@ -333,6 +346,12 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
             return CMOSErrorCode.InvalidImageFormat;
         }
 
+        // A stream's frames are sized when it starts: the DAL stops a stream to change its window.
+        if (session.IsStreaming)
+        {
+            return CMOSErrorCode.VideoModeActive;
+        }
+
         return ToDALError(session.Configure(width, height, bin, pixelDataFormat is PixelDataFormat.RAW16), CMOSErrorCode.InvalidSize);
     }
 
@@ -345,6 +364,11 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
             return CMOSErrorCode.CameraClosed;
         }
 
+        if (session.IsStreaming)
+        {
+            return CMOSErrorCode.VideoModeActive;
+        }
+
         if (!session.TryGetFinalSize(out var width, out var height))
         {
             return CMOSErrorCode.GeneralError;
@@ -353,6 +377,76 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
         return (long)width * height * (session.Bits16 ? 2 : 1) > bufferSize
             ? CMOSErrorCode.BufferTooSmall
             : ToDALError(session.PullFrame(buffer));
+    }
+
+    // ---- Video ----------------------------------------------------------------------------------
+
+    /// <summary>True whenever the library is loaded: video (<c>TOUPCAM_OPTION_TRIGGER = 0</c>) is the
+    /// SDK's default mode on every model, and the software trigger this binding uses for single frames
+    /// is the special case.</summary>
+    public bool CanVideoCapture => _entry?.Brand.Api is not null;
+
+    /// <summary>
+    /// True: <c>put_Roi</c> moves the window of a running stream. Measured on the G3M678M (a
+    /// <c>TOUPCAM_FLAG_ROI_HARDWARE</c> body), ten 64 px pans at 197 frames a second: the picture moved
+    /// by exactly 64 px every time, the call blocked 33 ms, the stream paused 34 ms and went on with
+    /// the camera's frame count unbroken (no restart, which costs 200 ms here), no stall, and each pan
+    /// cost exactly one frame, which <see cref="TryGetDroppedFrames"/> counts.
+    /// </summary>
+    public bool CanPanRoiWhileStreaming => true;
+
+    /// <summary>
+    /// Switches the camera to free-running with the window, format and controls set now. Refused
+    /// with <see cref="CMOSErrorCode.ExposureInProgress"/> while a single exposure runs and
+    /// <see cref="CMOSErrorCode.VideoModeActive"/> while a stream already does.
+    /// </summary>
+    public CMOSErrorCode StartVideoCapture()
+        => Session is { } session ? session.StartVideo() : CMOSErrorCode.CameraClosed;
+
+    /// <summary>
+    /// Puts the camera back in software trigger mode, so the next <see cref="StartLightExposure"/>
+    /// runs exactly as one that never followed a stream. Waits for the camera to go quiet first, about
+    /// twice the exposure plus 50 ms.
+    /// </summary>
+    public CMOSErrorCode StopVideoCapture()
+        => Session is { } session ? session.StopVideo() : CMOSErrorCode.CameraClosed;
+
+    /// <summary>
+    /// The stream's next frame, in the order the camera sent them.
+    /// </summary>
+    /// <returns>
+    /// <see cref="CMOSErrorCode.Success"/> with the frame copied into <paramref name="buffer"/>;
+    /// <see cref="CMOSErrorCode.Timeout"/> when none arrived within <paramref name="waitMs"/>, which is not
+    /// a failure; <see cref="CMOSErrorCode.GeneralError"/> once the SDK has reported the transfer stalled
+    /// (<c>TOUPCAM_EVENT_NOPACKETTIMEOUT</c> or <c>NOFRAMETIMEOUT</c>, armed at 1 s and 2 s) or a generic
+    /// error, after the frames that came before it: the camera is still attached but no longer sending,
+    /// no DAL code names that, and <see cref="ResetDevice"/> is the cure; <see cref="CMOSErrorCode.CameraRemoved"/>
+    /// when the SDK reported the camera disconnected; <see cref="CMOSErrorCode.InvalidSequence"/> with no
+    /// stream running.
+    /// </returns>
+    public CMOSErrorCode GetVideoData(IntPtr buffer, int bufferSize, int waitMs)
+        => Session is { } session ? session.GetVideoFrame(buffer, bufferSize, waitMs) : CMOSErrorCode.CameraClosed;
+
+    /// <summary>
+    /// Frames lost since the stream started: gaps in the camera's own frame sequence numbers
+    /// (<c>ToupcamFrameInfoV4</c>), which are frames that never reached this binding, plus frames that
+    /// did and were thrown away because the reader had fallen a whole ring behind.
+    /// </summary>
+    /// <remarks>
+    /// True whenever the camera is open, EXCEPT for a stream whose sequence numbers turned out not to
+    /// be a count (garbage after a device reset, measured on the G3M678M): then the frames the camera
+    /// lost are unknown, and false says so where a zero would claim none were.
+    /// </remarks>
+    public bool TryGetDroppedFrames(out int dropped)
+    {
+        if (Session?.DroppedFrames is { } count)
+        {
+            dropped = count;
+            return true;
+        }
+
+        dropped = 0;
+        return false;
     }
 
     // ---- Helpers --------------------------------------------------------------------------------

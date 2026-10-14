@@ -27,6 +27,8 @@ namespace ToupTek.SDK;
 /// <c>Toupcam_Trigger(h, 1)</c> asks for one frame; the callback marks it ready on
 /// <c>TOUPCAM_EVENT_IMAGE</c>; and <c>Toupcam_PullImageV4</c> copies it into the caller's buffer. That is
 /// the DAL's start / poll / read shape exactly, with no video stream running between exposures.</para>
+/// <para><b>Video is the same SDK stream switched to free-running</b> (<c>TOUPCAM_OPTION_TRIGGER = 0</c>)
+/// and back; see the video partial for how its frames are handed over.</para>
 /// </remarks>
 internal sealed unsafe partial class ToupcamSession
 {
@@ -258,12 +260,19 @@ internal sealed unsafe partial class ToupcamSession
         return Succeeded(Api.StartPullModeWithCallback(Handle, &OnEvent, GCHandle.ToIntPtr(_self)));
     }
 
-    /// <summary>Stop before close, and close before freeing the callback context: stopping is what
-    /// guarantees no further callback can arrive carrying a pointer to this object.</summary>
+    /// <summary>Stop before close, and close before freeing the callback context and the video ring:
+    /// stopping is what guarantees no further callback can arrive carrying a pointer to this object.</summary>
     private void Shutdown()
     {
         _ = Api.Stop(Handle);
         Api.Close(Handle);
+        lock (_videoGate)
+        {
+            Volatile.Write(ref _videoActive, 0);
+        }
+
+        _videoSignal.Set();
+        FreeVideoRing();
         _self.Free();
     }
 
@@ -333,11 +342,13 @@ internal sealed unsafe partial class ToupcamSession
     /// Pull mode queues frames. If a caller abandoned an exposure after it finished (a cancelled capture,
     /// a timeout above this layer), its frame is still waiting, and without this the following trigger's
     /// read would hand back the OLD frame under the new exposure's metadata: a plausible picture with
-    /// the wrong exposure time, not an error.
+    /// the wrong exposure time, not an error. The first exposure after a video stream drains too, for a
+    /// frame the camera sent after it left video mode.
     /// </remarks>
     private void DrainPendingFrames()
     {
-        if (Volatile.Read(ref _state) is not StateReady || !TryGetFinalSize(out var w, out var h))
+        var afterVideo = Interlocked.Exchange(ref _drainBeforeTrigger, 0) != 0;
+        if ((Volatile.Read(ref _state) is not StateReady && !afterVideo) || !TryGetFinalSize(out var w, out var h))
         {
             return;
         }
@@ -432,21 +443,39 @@ internal sealed unsafe partial class ToupcamSession
         }
     }
 
+    /// <summary>
+    /// Routes one event: to the video ring while a stream runs, else to the single exposure.
+    /// </summary>
+    /// <remarks>
+    /// Pulling a frame from here is allowed (it is what the SDK's own samples do); what the manual
+    /// forbids in this context is <c>Toupcam_Stop</c>, <c>Toupcam_Close</c>, <c>put_Roi</c> and the
+    /// options that restart the stream.
+    /// </remarks>
     private void Signal(uint nEvent)
     {
         switch (nEvent)
         {
             case EVENT_IMAGE:
-                _ = Interlocked.CompareExchange(ref _state, StateReady, StateExposing);
+                if (!OnVideoFrame())
+                {
+                    _ = Interlocked.CompareExchange(ref _state, StateReady, StateExposing);
+                }
+
                 break;
             case EVENT_DISCONNECTED:
                 Volatile.Write(ref _disconnected, 1);
                 Volatile.Write(ref _state, StateFailed);
+                _ = OnVideoFault(nEvent);
                 break;
             // NOPACKETTIMEOUT is what a stalled transfer raises (the stream stops delivering USB
-            // packets); the DAL driver counts the failure and, if it repeats, resets the camera.
+            // packets). For a single exposure the DAL driver counts the failure and, if it repeats,
+            // resets the camera; for a stream it ends the stream with an error the caller can act on.
             case EVENT_TRIGGERFAIL or EVENT_ERROR or EVENT_NOFRAMETIMEOUT or EVENT_NOPACKETTIMEOUT:
-                _ = Interlocked.CompareExchange(ref _state, StateFailed, StateExposing);
+                if (!OnVideoFault(nEvent))
+                {
+                    _ = Interlocked.CompareExchange(ref _state, StateFailed, StateExposing);
+                }
+
                 break;
         }
     }
