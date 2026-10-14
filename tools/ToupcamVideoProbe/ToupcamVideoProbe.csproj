@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A HARDWARE probe for the binding's video path, driven through the DAL members only (plus the
+    binding's own SdkFrameRate diagnostic), against a ToupTek camera that must be plugged in.
+    NOT part of the package build and not run by CI: it needs the camera, holds it for minutes, and
+    resets it in its stall arm. Run it by hand, with nothing else holding the camera:
+      dotnet run -c Release (two dashes) rate | stall | pan | all
+    See the README ("Video, and the probe") for what each arm does and the numbers it gave.
+    Exit code 0 when every check passed, 1 when one failed, 2 when no camera was found.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\ToupTek.SDK.csproj" />
+  </ItemGroup>
+
+</Project>

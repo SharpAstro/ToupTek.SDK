@@ -26,6 +26,11 @@
 	-->
 	<Compile Remove="reference/**" />
 	<None Remove="reference/**" />
+	<!-- tools/ holds consoles with projects of their own (the hardware probe), and their obj/ folders
+	     carry generated sources that would otherwise compile into this assembly. -->
+	<Compile Remove="tools/**" />
+	<None Remove="tools/**" />
+	<EmbeddedResource Remove="tools/**" />
 	<None Include="README.md" PackagePath="" Pack="true" />
 	<None Include="LICENSE" PackagePath="" Pack="true" />
   </ItemGroup>
