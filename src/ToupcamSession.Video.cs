@@ -48,6 +48,14 @@ internal sealed unsafe partial class ToupcamSession
     /// believed to be frames lost.</summary>
     private const int SequenceTrustSteps = 4;
 
+    /// <summary>Frames a stream may take to show a sequence that counts; after that, a stream whose
+    /// sequence never did, or which reports none, has its camera-side losses unknown.</summary>
+    private const int SequenceTrustWithin = 64;
+
+    /// <summary>Frames in a row whose sequence number is not a count, after which the stream's sequence
+    /// is taken as broken rather than as a frame or two with bad info.</summary>
+    private const int SequenceGarbageLimit = 8;
+
     // Held by the callback around a pull into the ring, and by a start or stop around switching it on or
     // off. NEVER held across an SDK call that waits for the callback (Stop, put_Option(TRIGGER)): the
     // manual names exactly that as a deadlock.
@@ -73,6 +81,11 @@ internal sealed unsafe partial class ToupcamSession
     private uint _videoLastSequence;
     private bool _videoHasSequence;
     private int _videoSequenceRun;
+    private int _videoSequenceTrusted;
+    private int _videoSequenceGarbage;
+    private bool _videoJumpPending;
+    private uint _videoJumpSequence;
+    private uint _videoJumpLost;
     private int _videoSequenceBroken;
     private uint _videoFault;
 
@@ -90,6 +103,7 @@ internal sealed unsafe partial class ToupcamSession
     /// </summary>
     internal int? DroppedFrames
         => Volatile.Read(ref _videoSequenceBroken) != 0
+           || (Volatile.Read(ref _videoSequenceTrusted) == 0 && Volatile.Read(ref _videoArrivals) >= SequenceTrustWithin)
             ? null
             : (int)Math.Min(int.MaxValue, Volatile.Read(ref _videoSequenceGaps) + Volatile.Read(ref _videoDiscarded));
 
@@ -131,6 +145,9 @@ internal sealed unsafe partial class ToupcamSession
             _videoDiscarded = 0;
             _videoHasSequence = false;
             _videoSequenceRun = 0;
+            _videoSequenceTrusted = 0;
+            _videoSequenceGarbage = 0;
+            _videoJumpPending = false;
             _videoSequenceBroken = 0;
             _videoFault = 0;
             _videoSignal.Reset();
@@ -312,18 +329,27 @@ internal sealed unsafe partial class ToupcamSession
 
     /// <summary>
     /// Counts the frames missing between this one and the last, by the camera's own sequence number,
-    /// when the SDK reports one. The first frame of a stream only sets the baseline.
+    /// when the SDK reports one.
     /// </summary>
     /// <remarks>
-    /// <para><b>The number is only believed while it behaves as a count.</b> Measured on the G3M678M:
-    /// on the first handle opened after a <c>TOUPCAM_OPTION_DEVICE_RESET</c>, every frame still carries
-    /// <c>TOUPCAM_FRAMEINFO_FLAG_SEQ</c> but the sequence (and the timestamp) cycles through five fixed
-    /// values (0, 16777984, 16777216, 65537, 65792), while the pixels and the rate are fine; read as
-    /// gaps, that was 51 frames "lost" for every one delivered. (<see cref="Acquire"/> now opens twice
-    /// after a reset, which cures it.) So a jump counts as lost frames only when the sequence had
-    /// stepped by exactly one <see cref="SequenceTrustSteps"/> times in a row before it, and a step
-    /// backwards, of zero, or too large to be frames marks the stream's sequence as broken: frames the
-    /// camera lost are then unknown, and the count says so rather than saying zero.</para>
+    /// <para><b>The number is only believed while it behaves as a count</b>, because on the G3M678M it
+    /// does not always. On the first handle opened after a <c>TOUPCAM_OPTION_DEVICE_RESET</c> every
+    /// frame carries <c>TOUPCAM_FRAMEINFO_FLAG_SEQ</c> but the sequence (and the timestamp) cycles
+    /// through five fixed values (0, 16777984, 16777216, 65537, 65792), while the pixels and the rate
+    /// are fine; read as gaps, that was 51 frames "lost" for every one delivered (<see cref="Acquire"/>
+    /// now opens twice after a reset, which cures it). And on a good handle a frame now and then
+    /// carries such a value in the middle of a run that otherwise counts by one (three in 3,700 frames
+    /// in one stream, none in 12,000 in others), the next good number sometimes skipping one more
+    /// than the frames between.</para>
+    /// <para>So: a stream's sequence is trusted once it has stepped by exactly one
+    /// <see cref="SequenceTrustSteps"/> times in a row, and only a trusted one counts gaps. A jump
+    /// forward is counted only once the next frame continues from it, since a bad value can land a
+    /// plausible distance ahead. A frame whose number does not fit (backwards, the same, too far ahead,
+    /// or a jump the next frame does not confirm) is taken as one frame with bad info, and the next good
+    /// number is measured from the last good one with that frame allowed for.
+    /// <see cref="SequenceGarbageLimit"/> such frames in a row, or no trust within
+    /// <see cref="SequenceTrustWithin"/> frames, and the camera-side count is unknown, which
+    /// <see cref="DroppedFrames"/> then says rather than saying zero.</para>
     /// </remarks>
     private void NoteSequence(byte* info)
     {
@@ -333,27 +359,57 @@ internal sealed unsafe partial class ToupcamSession
         }
 
         var sequence = *(uint*)(info + FRAMEINFO_SEQ_OFFSET);
-        if (_videoHasSequence)
+        if (!_videoHasSequence)
         {
-            var step = unchecked(sequence - _videoLastSequence);
-            if (step == 1)
-            {
-                _videoSequenceRun++;
-            }
-            else if (step is > 1 and <= MaxSequenceGap && _videoSequenceRun >= SequenceTrustSteps)
-            {
-                Volatile.Write(ref _videoSequenceGaps, _videoSequenceGaps + step - 1);
-                _videoSequenceRun = 1;
-            }
-            else
-            {
-                Volatile.Write(ref _videoSequenceBroken, 1);
-                _videoSequenceRun = 0;
-            }
+            _videoLastSequence = sequence;
+            _videoHasSequence = true;
+            return;
         }
 
-        _videoLastSequence = sequence;
-        _videoHasSequence = true;
+        if (_videoSequenceRun < SequenceTrustSteps)
+        {
+            // Not trusted yet: only a step of one builds trust, and anything else starts again here.
+            _videoSequenceRun = unchecked(sequence - _videoLastSequence) == 1 ? _videoSequenceRun + 1 : 0;
+            _videoLastSequence = sequence;
+            if (_videoSequenceRun == SequenceTrustSteps)
+            {
+                Volatile.Write(ref _videoSequenceTrusted, 1);
+            }
+
+            return;
+        }
+
+        if (_videoJumpPending)
+        {
+            _videoJumpPending = false;
+            if (sequence == unchecked(_videoJumpSequence + 1))
+            {
+                Volatile.Write(ref _videoSequenceGaps, _videoSequenceGaps + _videoJumpLost);
+                _videoLastSequence = sequence;
+                _videoSequenceGarbage = 0;
+                return;
+            }
+
+            // The jump was not confirmed: that frame carried bad info.
+            _videoSequenceGarbage++;
+        }
+
+        // Frames with bad info since the last good number were frames too, so each moves the count on.
+        var step = unchecked(sequence - _videoLastSequence);
+        var expected = 1u + (uint)_videoSequenceGarbage;
+        if (step == expected)
+        {
+            _videoLastSequence = sequence;
+            _videoSequenceGarbage = 0;
+        }
+        else if (step > expected && step <= MaxSequenceGap)
+        {
+            (_videoJumpPending, _videoJumpSequence, _videoJumpLost) = (true, sequence, step - expected);
+        }
+        else if (++_videoSequenceGarbage >= SequenceGarbageLimit)
+        {
+            Volatile.Write(ref _videoSequenceBroken, 1);
+        }
     }
 
     /// <summary>On the SDK's callback thread: the stream failed. True when a stream was running to hear it.</summary>
