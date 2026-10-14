@@ -23,6 +23,9 @@ namespace ToupTek.SDK;
 /// above that.</item>
 /// <item><c>TemperatureDeci</c> is <c>get_Temperature</c>, already tenths of a degree;
 /// <c>TargetTemperature</c> is whole degrees over <c>TOUPCAM_OPTION_TECTARGET</c>'s tenths.</item>
+/// <item><c>BandwidthOverload</c> is the SDK's speed level (<c>put_Speed</c>), 0 to
+/// <c>get_MaxSpeed</c>, NOT a percentage; <c>HighSpeedMode</c> is not offered. The session's
+/// controls say why.</item>
 /// </list></para>
 /// <para><b>Conversion gain is deliberately not touched.</b> <c>TOUPCAM_OPTION_CG</c> (LCG, HCG and, on
 /// some bodies, HDR) stays at the camera's own default: SharpCap likewise keeps it behind an opt-in

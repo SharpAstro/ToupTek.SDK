@@ -50,6 +50,10 @@ public sealed unsafe class ToupcamApi
     internal readonly delegate* unmanaged[Stdcall]<nint, int*, int*, int> GetFinalSize;
     internal readonly delegate* unmanaged[Stdcall]<nint, int> GetMaxBitDepth;
     internal readonly delegate* unmanaged[Stdcall]<nint, uint, uint, int> ST4PlusGuide;
+    internal readonly delegate* unmanaged[Stdcall]<nint, ushort, int> PutSpeed;
+    internal readonly delegate* unmanaged[Stdcall]<nint, ushort*, int> GetSpeed;
+    internal readonly delegate* unmanaged[Stdcall]<nint, int> GetMaxSpeed;
+    internal readonly delegate* unmanaged[Stdcall]<nint, uint*, uint*, uint*, int> GetFrameRate;
 
     private ToupcamApi(nint library, string prefix)
     {
@@ -80,6 +84,10 @@ public sealed unsafe class ToupcamApi
         GetFinalSize = (delegate* unmanaged[Stdcall]<nint, int*, int*, int>)Export(library, prefix, "get_FinalSize");
         GetMaxBitDepth = (delegate* unmanaged[Stdcall]<nint, int>)Export(library, prefix, "get_MaxBitDepth");
         ST4PlusGuide = (delegate* unmanaged[Stdcall]<nint, uint, uint, int>)Export(library, prefix, "ST4PlusGuide");
+        PutSpeed = (delegate* unmanaged[Stdcall]<nint, ushort, int>)Export(library, prefix, "put_Speed");
+        GetSpeed = (delegate* unmanaged[Stdcall]<nint, ushort*, int>)Export(library, prefix, "get_Speed");
+        GetMaxSpeed = (delegate* unmanaged[Stdcall]<nint, int>)Export(library, prefix, "get_MaxSpeed");
+        GetFrameRate = (delegate* unmanaged[Stdcall]<nint, uint*, uint*, uint*, int>)Export(library, prefix, "get_FrameRate");
     }
 
     /// <summary>
