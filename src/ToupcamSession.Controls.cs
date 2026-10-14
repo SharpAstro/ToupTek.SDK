@@ -5,6 +5,25 @@ using static ToupTek.SDK.ToupcamConstants;
 namespace ToupTek.SDK;
 
 /// <summary>The DAL's controls over one open camera. See <see cref="ToupcamCamera"/> for the units.</summary>
+/// <remarks>
+/// <para><b>The speed level is <see cref="CMOSControlType.BandwidthOverload"/>, and only that.</b>
+/// <c>Toupcam_put_Speed</c> takes a "frame rate level" from 0 to <c>get_MaxSpeed</c> (2 on the
+/// G3M678M, which opens at 2). The SDK manual equates the levels with the camera's share of the link:
+/// on a body with precise frame-rate control, level n IS a bandwidth of (n + 1) x 10 percent. That is
+/// what the DAL's bandwidth control means (ZWO's <c>ASI_BANDWIDTHOVERLOAD</c>, the share of USB the
+/// camera may take), and what TianWen's video loop does with it fits exactly: it takes the maximum for
+/// a stream and gives back what it found. The VALUE is the level, not a percentage, and the range says
+/// so: a caller writing ZWO's 40 to 100 here is refused rather than silently mapped. On the G3M678M the
+/// level sets the frame rate through the sensor's row time (480 rows take 4.98 ms at 2, 7.63 at 1 and
+/// 10.2 at 0, measured 2026-10-14), so a stream wants the highest.</para>
+/// <para><b><see cref="CMOSControlType.HighSpeedMode"/> is not offered.</b> On ZWO it is a readout
+/// mode that trades converter depth for speed (10 bits instead of 12), and this SDK has nothing that
+/// trades precision: the pixels are 12-bit at every level. Mapping it onto the same <c>put_Speed</c>
+/// would make two DAL controls one knob, the last write winning: TianWen writes
+/// <c>HighSpeedMode = 0</c> at connect, which would drop a camera that opens at its fastest level to
+/// its slowest for every single exposure, and a stream asking for the high-speed readout off would
+/// have it undone by the bandwidth taken a moment later.</para>
+/// </remarks>
 internal sealed unsafe partial class ToupcamSession
 {
     /// <summary>The raw mosaic as a FOURCC (<c>MAKEFOURCC('R','G','G','B')</c> and so on), or 0.</summary>
@@ -31,6 +50,10 @@ internal sealed unsafe partial class ToupcamSession
     internal int PulseGuide(uint direction, uint milliseconds) => Api.ST4PlusGuide(Handle, direction, milliseconds);
 
     private bool Has(ulong flag) => Entry.Model.Has(flag);
+
+    /// <summary>The highest speed level (<c>Toupcam_get_MaxSpeed</c>), the model's when the handle does
+    /// not answer; 0 means the body has one level and nothing to choose.</summary>
+    internal int MaxSpeed => Api.GetMaxSpeed(Handle) is var max and > 0 ? max : (int)Entry.Model.MaxSpeed;
 
     /// <summary>The bit depth the stream runs at NOW, which is what the black level range follows.</summary>
     private int CurrentBitDepth => Bits16 ? MaxBitDepth : 8;
@@ -99,6 +122,9 @@ internal sealed unsafe partial class ToupcamSession
                 (min, max) = (0, heatMax);
                 return true;
             }
+            case CMOSControlType.BandwidthOverload when MaxSpeed > 0:
+                (min, max) = (0, MaxSpeed);
+                return true;
             default:
                 return false;
         }
@@ -158,6 +184,13 @@ internal sealed unsafe partial class ToupcamSession
             case CMOSControlType.AntiDewHeater when Has(FLAG_HEAT):
                 hr = GetOption(OPTION_HEAT, out value);
                 break;
+            case CMOSControlType.BandwidthOverload when MaxSpeed > 0:
+            {
+                ushort speed;
+                hr = Api.GetSpeed(Handle, &speed);
+                value = speed;
+                break;
+            }
             default:
                 return CMOSErrorCode.InvalidControlType;
         }
@@ -176,6 +209,7 @@ internal sealed unsafe partial class ToupcamSession
             CMOSControlType.CoolerOn when Has(FLAG_TEC_ONOFF) => Api.PutOption(Handle, OPTION_TEC, value != 0 ? 1 : 0),
             CMOSControlType.FanOn when Has(FLAG_FAN) => Api.PutOption(Handle, OPTION_FAN, value),
             CMOSControlType.AntiDewHeater when Has(FLAG_HEAT) => Api.PutOption(Handle, OPTION_HEAT, value),
+            CMOSControlType.BandwidthOverload when MaxSpeed > 0 => value >= 0 && value <= MaxSpeed ? Api.PutSpeed(Handle, (ushort)value) : E_INVALIDARG,
             CMOSControlType.Exposure or CMOSControlType.Gain => E_INVALIDARG,
             _ => E_NOTIMPL,
         };
