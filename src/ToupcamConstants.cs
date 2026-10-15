@@ -69,11 +69,11 @@ internal static class ToupcamConstants
     /// <summary><c>TOUPCAM_OPTION_FLUSH</c> value: a SOFT flush, discarding the frames cached in the
     /// library and leaving the camera's own frame memory alone.</summary>
     /// <remarks>
-    /// Not the hard flush (1, or 3 for both), which empties the camera's DDR: measured on the
-    /// G3M678M (a <c>TOUPCAM_FLAG_DDR</c> body) on 2026-10-15, a hard flush beside each switch into
-    /// and out of video mode stalled 12 of 20 streams of 30 to 60 s, whatever the thread priorities
-    /// and queue depths, while the vendor's own binding switching the same way without a flush streamed
-    /// 10 of 10 and the soft flush has stalled none (README, "Video").
+    /// Not the hard flush (1, or 3 for both), which empties the camera's DDR, because it is not needed:
+    /// the switch out of video leaves nothing behind for it (measured on the G3M678M, a
+    /// <c>TOUPCAM_FLAG_DDR</c> body, 2026-10-15). It was suspected of the stalls first, having stalled
+    /// 12 of 20 streams of 30 to 60 s one morning, but later periods stalled as often with the soft
+    /// flush and with the vendor's own binding, which flushes nothing (README, "Stalls under video").
     /// </remarks>
     internal const int FLUSH_SOFT = 2;
 
