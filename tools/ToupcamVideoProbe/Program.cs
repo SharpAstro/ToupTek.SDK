@@ -102,26 +102,30 @@ internal static class Program
 
     /// <summary>
     /// Three 60 s runs at the Saturn region in 8 bits at 5 ms, each on a fresh open, then one in 16 bits
-    /// and one at 2 ms. A run passes at 190 frames a second or more (90 in 16 bits), no stall, and no
-    /// more than one frame dropped in <see cref="DropBar"/>.
+    /// and one at 2 ms. A run passes at 190 frames a second or more (90 in 16 bits) and no stall; the
+    /// 5 ms runs, 8 and 16 bits, also with no more than one frame dropped in <see cref="DropBar"/>.
     /// </summary>
     /// <remarks>
-    /// The bar is SharpCap's on this camera, the night of 2026-10-07 (about 55 frames dropped in nearly
-    /// 100,000, at 15 ms): some frames lost is fine for a planetary stack, more than SharpCap loses is
-    /// not.
+    /// <para>The drop bar is SharpCap's on this camera, the night of 2026-10-07 (about 55 frames dropped
+    /// in nearly 100,000, at 15 ms): some frames lost is fine for a planetary stack, more than SharpCap
+    /// loses is not.</para>
+    /// <para>The 2 ms run's drops are printed and not judged. Its own bar is the rate, about 200: at
+    /// 2 ms the readout sets the rate, and there this camera loses frames on its own, at every speed
+    /// level (1 in 925 to 1 in 22,809 in the runs of 2026-10-15), so holding it to the 5 ms bar would
+    /// fail a working stream.</para>
     /// </remarks>
     private static bool RateArm(TimeSpan duration)
     {
         Console.WriteLine();
         Console.WriteLine($"== rate: {RoiWidth}x{RoiHeight} at ({RoiX}, {RoiY}), gain {Gain}, {duration.TotalSeconds:F0} s per run after 1 s settling, each run on a fresh open");
         var ok = true;
-        (string Label, bool Bits16, int ExposureUs, double MinFps)[] runs =
+        (string Label, bool Bits16, int ExposureUs, double MinFps, bool DropsJudged)[] runs =
         [
-            ("8-bit, 5 ms", false, 5000, 190),
-            ("8-bit, 5 ms", false, 5000, 190),
-            ("8-bit, 5 ms", false, 5000, 190),
-            ("16-bit, 5 ms", true, 5000, 90),
-            ("8-bit, 2 ms", false, 2000, 190),
+            ("8-bit, 5 ms", false, 5000, 190, true),
+            ("8-bit, 5 ms", false, 5000, 190, true),
+            ("8-bit, 5 ms", false, 5000, 190, true),
+            ("16-bit, 5 ms", true, 5000, 90, true),
+            ("8-bit, 2 ms", false, 2000, 190, false),
         ];
 
         for (var i = 0; i < runs.Length; i++)
@@ -132,9 +136,10 @@ internal static class Program
             {
                 Configure(camera, run.Bits16, run.ExposureUs, RoiX, RoiY);
                 var result = Stream(camera, run.Bits16, TimeSpan.FromSeconds(1), duration);
-                var passed = result.Stall is null && result.Fps >= run.MinFps && result.Dropped is { } lost && lost * DropBar <= result.Frames;
+                var dropsHeld = !run.DropsJudged || (result.Dropped is { } lost && lost * DropBar <= result.Frames);
+                var passed = result.Stall is null && result.Fps >= run.MinFps && dropsHeld;
                 ok &= passed;
-                var oneIn = result.Dropped is > 0 ? $" (1 in {result.Frames / result.Dropped.Value})" : "";
+                var oneIn = (result.Dropped is > 0 ? $" (1 in {result.Frames / result.Dropped.Value})" : "") + (run.DropsJudged ? "" : ", not judged");
                 Console.WriteLine($"run {i + 1}: {run.Label}: {result.Frames} frames in {result.Seconds:F2} s = {result.Fps:F1} fps by Stopwatch; "
                     + $"get_FrameRate {Format(result.SdkFps)}; dropped {Format(result.Dropped)}{oneIn}; stalls {(result.Stall is null ? 0 : 1)}{Describe(result)}; "
                     + $"timeouts {result.Timeouts}; mean {result.MeanAdu:F1} ADU; stop {result.StopCode} in {result.StopMs:F0} ms  {(passed ? "PASS" : "FAIL")}");
