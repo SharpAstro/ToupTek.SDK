@@ -90,6 +90,7 @@ internal static class ToupcamConstants
 
     // ---- Model flags (ToupcamModelV2.flag, 64 bits) ----
 
+    internal const ulong FLAG_ROI_HARDWARE = 0x00000008;
     internal const ulong FLAG_MONO = 0x00000010;
     internal const ulong FLAG_USB30 = 0x00000040;
     internal const ulong FLAG_TEC = 0x00000080;
