@@ -32,12 +32,16 @@ internal static class Program
     /// <summary>Time since the probe last reset the camera, for the soak's stall lines.</summary>
     private static readonly Stopwatch SinceReset = new Stopwatch();
 
+    /// <summary>Whether a stall is first nudged (the speed level, then the window) before the stream is
+    /// stopped: the recover arm's question.</summary>
+    private static bool TryNudges;
+
     private static int Main(string[] args)
     {
         var arm = args.Length > 0 ? args[0].ToLowerInvariant() : "";
-        if (arm is not ("rate" or "stall" or "pan" or "all" or "soak" or "speedstep"))
+        if (arm is not ("rate" or "stall" or "pan" or "all" or "soak" or "speedstep" or "recover"))
         {
-            Console.WriteLine("usage: ToupcamVideoProbe rate|stall|pan|all|soak|speedstep [--seconds N] [--cycles N] [--rounds N] [--segment S]");
+            Console.WriteLine("usage: ToupcamVideoProbe rate|stall|pan|all|soak|speedstep|recover [--seconds N] [--cycles N] [--rounds N] [--segment S]");
             return 1;
         }
 
@@ -76,9 +80,9 @@ internal static class Program
             ok &= SpeedStepArm();
         }
 
-        if (arm is "soak")
+        if (arm is "soak" or "recover")
         {
-            ok &= SoakArm(rounds, TimeSpan.FromSeconds(segment));
+            ok &= SoakArm(rounds, TimeSpan.FromSeconds(segment), recover: arm is "recover");
         }
 
         Console.WriteLine(ok ? "ALL PASSED" : "SOME CHECKS FAILED");
@@ -537,6 +541,8 @@ internal static class Program
         public int UnknownDrops;
         public int Stalls;
         public int Warned;
+        public int SpeedNudged;
+        public int WindowNudged;
         public int Restarted;
         public int Reopened;
         public int Reset;
@@ -552,17 +558,30 @@ internal static class Program
     /// timed from the last frame to the first again; per stall, the frames dropped in the 10 s before it
     /// say whether drops warn of one.
     /// </summary>
-    private static bool SoakArm(int rounds, TimeSpan segment)
+    /// <remarks>
+    /// With <paramref name="recover"/> it is the recover arm instead: 5 ms only, at the top speed level
+    /// and the one below it, and a stall is first nudged, the speed level set to its neighbour and back
+    /// and then the window moved 2 px and back, each given 2 s to bring frames back, before the stream is
+    /// stopped. The question is whether a stall can be undone without the stop, which blocks about 5 s
+    /// on a stalled camera.
+    /// </remarks>
+    private static bool SoakArm(int rounds, TimeSpan segment, bool recover)
     {
+        TryNudges = recover;
         Console.WriteLine();
-        Console.WriteLine($"== soak: 8-bit {RoiWidth}x{RoiHeight} at ({RoiX}, {RoiY}), gain {Gain}; every exposure at every speed level, "
-            + $"{segment.TotalSeconds:F0} s segments round-robin, {rounds} rounds, from a reset");
+        Console.WriteLine(recover
+            ? $"== recover: 8-bit {RoiWidth}x{RoiHeight} at ({RoiX}, {RoiY}), gain {Gain}, 5 ms at the top two speed levels, "
+                + $"{segment.TotalSeconds:F0} s segments alternating, {rounds} rounds, from a reset; a stall is nudged before it is stopped"
+            : $"== soak: 8-bit {RoiWidth}x{RoiHeight} at ({RoiX}, {RoiY}), gain {Gain}; every exposure at every speed level, "
+                + $"{segment.TotalSeconds:F0} s segments round-robin, {rounds} rounds, from a reset");
         var camera = ResetOnly(OpenFresh());
         Console.WriteLine($"reset at the start, open again after {SinceReset.Elapsed.TotalSeconds:F1} s");
         var speeds = camera.TryGetControlRange(CMOSControlType.BandwidthOverload, out var lowest, out var highest)
             ? Enumerable.Range(lowest, highest - lowest + 1).Reverse().ToArray()
             : [0];
-        var cells = new[] { 5000, 15000, 2000 }.SelectMany(exposure => speeds.Select(speed => new SoakCell(exposure, speed))).ToList();
+        var cells = recover
+            ? speeds.Take(2).Select(speed => new SoakCell(5000, speed)).ToList()
+            : new[] { 5000, 15000, 2000 }.SelectMany(exposure => speeds.Select(speed => new SoakCell(exposure, speed))).ToList();
         var completed = true;
         try
         {
@@ -585,14 +604,16 @@ internal static class Program
         }
 
         Console.WriteLine();
-        Console.WriteLine("| Exposure, speed | Streamed | fps | Dropped | 1 in | Stalls | Per hour | Drops in the 10 s before | Restart | Reopen | Reset | Mean recovery |");
-        Console.WriteLine("|---|---|---|---|---|---|---|---|---|---|---|---|");
+        Console.WriteLine("| Exposure, speed | Streamed | fps | Delivered fps | Dropped | 1 in | Stalls | Per hour | Drops in the 10 s before | Speed nudge | Window nudge | Restart | Reopen | Reset | Mean recovery |");
+        Console.WriteLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
         foreach (var cell in cells)
         {
             var oneIn = cell.Dropped > 0 ? (cell.Frames / cell.Dropped).ToString(CultureInfo.InvariantCulture) : "none";
-            Console.WriteLine($"| {cell.Label} | {cell.Seconds:F0} s | {(cell.Seconds > 0 ? cell.Frames / cell.Seconds : 0):F1} | {cell.Dropped}{(cell.UnknownDrops > 0 ? $" (+{cell.UnknownDrops} unknown)" : "")} "
+            var wall = cell.Seconds + cell.RecoverySeconds;
+            Console.WriteLine($"| {cell.Label} | {cell.Seconds:F0} s | {(cell.Seconds > 0 ? cell.Frames / cell.Seconds : 0):F1} | {(wall > 0 ? cell.Frames / wall : 0):F1} "
+                + $"| {cell.Dropped}{(cell.UnknownDrops > 0 ? $" (+{cell.UnknownDrops} unknown)" : "")} "
                 + $"| {oneIn} | {cell.Stalls} | {(cell.Seconds > 0 ? cell.Stalls * 3600 / cell.Seconds : 0):F0} | {cell.Warned} of {cell.Stalls} "
-                + $"| {cell.Restarted} | {cell.Reopened} | {cell.Reset} | {(cell.Stalls > 0 ? cell.RecoverySeconds / cell.Stalls : 0):F1} s |");
+                + $"| {cell.SpeedNudged} | {cell.WindowNudged} | {cell.Restarted} | {cell.Reopened} | {cell.Reset} | {(cell.Stalls > 0 ? cell.RecoverySeconds / cell.Stalls : 0):F1} s |");
         }
 
         return completed;
@@ -709,6 +730,30 @@ internal static class Program
     /// </summary>
     private static ToupcamCamera Recover(ToupcamCamera camera, SoakCell cell, nint buffer, int frameBytes, out string how)
     {
+        if (TryNudges)
+        {
+            // The speed level to its neighbour and back: a change of it takes 9 ms on a healthy stream.
+            _ = camera.TryGetControlRange(CMOSControlType.BandwidthOverload, out var lowest, out _);
+            _ = camera.SetControlValue(CMOSControlType.BandwidthOverload, cell.Speed > lowest ? cell.Speed - 1 : cell.Speed + 1);
+            _ = camera.SetControlValue(CMOSControlType.BandwidthOverload, cell.Speed);
+            if (FrameWithin(camera, buffer, frameBytes, TimeSpan.FromSeconds(2)))
+            {
+                cell.SpeedNudged++;
+                how = "speed level nudged" + RestartHealthy(camera);
+                return camera;
+            }
+
+            // The window 2 px and back: put_Roi on a healthy stream costs one frame.
+            _ = camera.SetStartPosition(RoiX + 2, RoiY);
+            _ = camera.SetStartPosition(RoiX, RoiY);
+            if (FrameWithin(camera, buffer, frameBytes, TimeSpan.FromSeconds(2)))
+            {
+                cell.WindowNudged++;
+                how = "window nudged" + RestartHealthy(camera);
+                return camera;
+            }
+        }
+
         _ = camera.StopVideoCapture();
         if (camera.StartVideoCapture() is CMOSErrorCode.Success && FirstFrame(camera, buffer, frameBytes))
         {
@@ -740,6 +785,39 @@ internal static class Program
 
         _ = camera.StopVideoCapture();
         throw new InvalidOperationException($"{cell.Label}: no frame after a restart, a reopen and a reset");
+    }
+
+    /// <summary>
+    /// Whether a frame arrives within <paramref name="span"/> on a stream the binding has already
+    /// called stalled. It goes on answering the stall once its ring is empty, so this keeps asking
+    /// rather than taking the first answer.
+    /// </summary>
+    private static bool FrameWithin(ToupcamCamera camera, nint buffer, int frameBytes, TimeSpan span)
+    {
+        var clock = Stopwatch.StartNew();
+        while (clock.Elapsed < span)
+        {
+            if (camera.GetVideoData(buffer, frameBytes, 50) is CMOSErrorCode.Success)
+            {
+                return true;
+            }
+
+            Thread.Sleep(5);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Stops and starts a stream that has frames again, since the binding keeps answering the stall
+    /// it saw until the stream is restarted; says what that cost.
+    /// </summary>
+    private static string RestartHealthy(ToupcamCamera camera)
+    {
+        var clock = Stopwatch.StartNew();
+        _ = camera.StopVideoCapture();
+        var started = camera.StartVideoCapture();
+        return $" (then restarted to clear the stall, {started} in {clock.Elapsed.TotalMilliseconds:F0} ms)";
     }
 
     /// <summary>Waits up to 3 s for a started stream's first frame; false on any other answer.</summary>
