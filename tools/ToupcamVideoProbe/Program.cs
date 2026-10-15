@@ -49,7 +49,8 @@ internal static class Program
         }
 
         var seconds = IntOption(args, "--seconds", arm is "longexp" ? 30 : 60);
-        var exposureMs = IntOption(args, "--exposure-ms", 3000);
+        var exposureMs = IntOption(args, "--exposure-ms", arm is "longexp" ? 3000 : 5);
+        var pans = IntOption(args, "--pans", 10);
         var cycles = IntOption(args, "--cycles", 20);
         var rounds = IntOption(args, "--rounds", 4);
         var segment = IntOption(args, "--segment", 60);
@@ -71,7 +72,7 @@ internal static class Program
 
         if (arm is "pan" or "all")
         {
-            ok &= PanArm();
+            ok &= arm is "pan" ? PanArm(exposureMs, pans) : PanArm(5, 10);
         }
 
         if (arm is "stall" or "all")
@@ -329,34 +330,54 @@ internal static class Program
     // ---- Pan -----------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Moves the window by 64 px while the stream runs, ten times back and forth. A pan holds when the
-    /// picture moved by exactly that much, the camera lost at most one frame to it (its own frame
-    /// count, through <c>TryGetDroppedFrames</c>; a restart would lose the 40 or so of its 200 ms),
-    /// and the stream did not stall.
+    /// Moves the window by 64 px while the stream runs, <paramref name="pans"/> times back and forth, at
+    /// <paramref name="exposureMs"/>. A pan holds when the picture moved by exactly that much, the camera
+    /// lost at most one frame to it (its own frame count, through <c>TryGetDroppedFrames</c>; a restart
+    /// would lose the 40 or so of its 200 ms), and the stream did not stall.
     /// </summary>
     /// <remarks>
-    /// How long <c>SetStartPosition</c> blocks its caller, and the longest wait between two frames as
-    /// the reader saw them, are printed but not judged: the stream runs on while the call blocks, its
-    /// frames queuing in the ring, so the reader's gap measures the call rather than the camera.
+    /// <para>How long <c>SetStartPosition</c> blocks its caller, and the longest wait between two
+    /// frames as the reader saw them, are printed but not judged: the stream runs on while the call
+    /// blocks, its frames queuing in the ring, so the reader's gap measures the call rather than the
+    /// camera.</para>
+    /// <para>At an exposure of a second or more the pictures compared are single frames, not averages of
+    /// 16, and each pan is read for twice the exposure plus 1.5 s: the frame a pan costs is a whole
+    /// exposure without a packet, so a stall timeout armed at the exposure plus 1 s would fire in that
+    /// time if it is going to.</para>
     /// </remarks>
-    private static bool PanArm()
+    private static bool PanArm(int exposureMs, int pans)
     {
         Console.WriteLine();
         var camera = OpenFresh();
-        Console.WriteLine($"== pan: SetStartPosition by 64 px mid-stream, 8-bit, 5 ms; CanPanRoiWhileStreaming = {camera.CanPanRoiWhileStreaming}");
+        var isLong = exposureMs >= 1000;
+        var averaged = isLong ? 1 : 16;
+        var window = isLong ? TimeSpan.FromMilliseconds(2 * exposureMs + 1500) : TimeSpan.FromMilliseconds(500);
+        Console.WriteLine($"== pan: SetStartPosition by 64 px mid-stream, 8-bit, {exposureMs} ms, {pans} pans, pictures of {averaged} frame(s) compared; "
+            + $"CanPanRoiWhileStreaming = {camera.CanPanRoiWhileStreaming}");
         var frameBytes = RoiWidth * RoiHeight;
         var buffer = Marshal.AllocHGlobal(frameBytes);
         try
         {
-            Configure(camera, false, 5000, RoiX, RoiY);
+            Configure(camera, false, exposureMs * 1000, RoiX, RoiY);
             Check(camera.StartVideoCapture(), "start the stream");
             var clock = Stopwatch.StartNew();
             _ = ReadFor(camera, buffer, frameBytes, clock, TimeSpan.FromSeconds(1), null);
             var x = RoiX;
             var ok = true;
-            for (var pan = 1; pan <= 10; pan++)
+            for (var pan = 1; pan <= pans; pan++)
             {
-                var before = Average(camera, buffer, frameBytes, 16);
+                float[] before;
+                try
+                {
+                    before = Average(camera, buffer, frameBytes, averaged);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Console.WriteLine($"pan {pan}: STREAM ENDED at {clock.Elapsed.TotalSeconds:F2} s, before the pan: {ex.Message}");
+                    ok = false;
+                    break;
+                }
+
                 _ = camera.TryGetDroppedFrames(out var droppedBefore);
                 var dx = pan % 2 == 1 ? 64 : -64;
                 var calledAt = clock.Elapsed;
@@ -371,9 +392,23 @@ internal static class Program
 
                 x += dx;
                 var arrivals = new List<double>();
-                var after = ReadFor(camera, buffer, frameBytes, clock, TimeSpan.FromMilliseconds(500), arrivals);
-                var later = Average(camera, buffer, frameBytes, 16);
-                var (shift, contrast) = BestShift(before, later);
+                var after = ReadFor(camera, buffer, frameBytes, clock, window, arrivals);
+                var endedAt = after is null ? (TimeSpan?)null : clock.Elapsed;
+                float[]? later = null;
+                if (after is null)
+                {
+                    try
+                    {
+                        later = Average(camera, buffer, frameBytes, averaged);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        after = CMOSErrorCode.GeneralError;
+                        endedAt = clock.Elapsed;
+                    }
+                }
+
+                var (shift, contrast) = later is null ? (int.MinValue, double.NaN) : BestShift(before, later);
                 var gaps = arrivals.Zip(arrivals.Skip(1), (a, b) => b - a).ToList();
                 var firstGap = arrivals.Count > 0 ? arrivals[0] - calledAt.TotalMilliseconds : double.NaN;
                 var maxGap = gaps.Count > 0 ? Math.Max(gaps.Max(), firstGap) : double.NaN;
@@ -382,9 +417,12 @@ internal static class Program
                 var lost = droppedAfter - droppedBefore;
                 var moved = shift == dx;
                 ok &= after is null && moved && counted && lost <= 1;
-                Console.WriteLine($"pan {pan}: to ({x}, {RoiY}) by {dx,3}: picture moved {shift,4} px (match contrast {contrast:F2}); camera lost {(counted ? lost.ToString(CultureInfo.InvariantCulture) : "n/a")} frame(s); "
-                    + $"call {callMs:F1} ms; reader: {arrivals.Count} frames in the next 500 ms, first after {firstGap:F1} ms, longest gap {maxGap:F1} ms (median {median:F1})"
-                    + $"{(after is null ? "" : "; STREAM ENDED " + after)}");
+                var lastArrival = arrivals.Count > 0 ? arrivals[^1] : double.NaN;
+                Console.WriteLine($"pan {pan}: to ({x}, {RoiY}) by {dx,3} at {calledAt.TotalSeconds:F2} s: "
+                    + $"{(later is null ? "picture not compared" : $"picture moved {shift,4} px (match contrast {contrast:F2})")}; camera lost {(counted ? lost.ToString(CultureInfo.InvariantCulture) : "n/a")} frame(s); "
+                    + $"call {callMs:F1} ms; reader: {arrivals.Count} frames in the next {window.TotalMilliseconds:F0} ms, first after {firstGap:F1} ms, longest gap {maxGap:F1} ms (median {median:F1})"
+                    + $"{(after is null ? "" : $"; STREAM ENDED {after} at {endedAt!.Value.TotalSeconds:F2} s, {(endedAt.Value - calledAt).TotalSeconds:F2} s after the pan"
+                        + (double.IsNaN(lastArrival) ? "" : $", {endedAt.Value.TotalMilliseconds / 1000 - lastArrival / 1000:F2} s after the last frame"))}");
                 if (after is not null)
                 {
                     break;

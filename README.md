@@ -217,6 +217,12 @@ evidently restarting the transfer, so a start costs about 200 ms and a stop 250 
   moved by exactly 64 px every time, the camera's frame count went on unbroken with exactly one frame
   lost per pan, and nothing stalled. The call blocks its caller 32 to 285 ms while the stream runs on
   into the ring. A body without a hardware window answers false, since nothing was measured on one.
+  **At a long exposure a pan does not end the stream either**, though it costs time: at 3 s (four
+  pans, 2026-10-15, `pan --exposure-ms 3000 --pans 4`) the picture moved by exactly 64 px each time,
+  the camera counted no frame lost and no timeout fired, but the call blocked its caller 3.0 to 3.2 s
+  (about one exposure) and the first frame of the new window came 6.0 s after the call. That is two
+  exposures without a frame, longer than the stream's no-packet timeout (the exposure plus 1 s, 4 s
+  here), so the SDK evidently re-arms its timers when the window moves.
 - **`BandwidthOverload` is the speed level** (`put_Speed`, 0 to `get_MaxSpeed`, 2 here and the
   camera's own default), NOT a percentage: the SDK manual equates the levels with the camera's share
   of the link, which is what the DAL's control means, and TianWen's video loop takes the maximum for
@@ -257,6 +263,7 @@ else holding the camera:
 dotnet run --project tools/ToupcamVideoProbe -c Release -- all      # rate, pan and stall
 dotnet run --project tools/ToupcamVideoProbe -c Release -- rate --seconds 30
 dotnet run --project tools/ToupcamVideoProbe -c Release -- stall --cycles 50
+dotnet run --project tools/ToupcamVideoProbe -c Release -- pan --exposure-ms 3000 --pans 4
 dotnet run --project tools/ToupcamVideoProbe -c Release -- speedstep
 dotnet run --project tools/ToupcamVideoProbe -c Release -- soak --rounds 4 --segment 60
 dotnet run --project tools/ToupcamVideoProbe -c Release -- recover --rounds 10 --segment 60
@@ -270,9 +277,11 @@ dotnet run --project tools/ToupcamVideoProbe -c Release -- longexp --exposure-ms
   in nearly 100,000, the night of 2026-10-07). The 2 ms run's drops are printed, not judged: its bar
   is the rate, about 200, and at 2 ms the readout sets the rate, where this camera loses frames on its
   own (1 in 925 to 1 in 22,809 on 2026-10-15, at every speed level).
-- **pan**: ten 64 px `SetStartPosition` moves mid-stream; the shift of the picture is measured by
-  matching 16-frame averages (a capped camera's fixed pattern is enough), and the camera's loss per
-  pan by its own count.
+- **pan**: ten 64 px `SetStartPosition` moves mid-stream at 5 ms (`--exposure-ms`, `--pans`); the
+  shift of the picture is measured by matching 16-frame averages (single frames at a second or
+  more; a capped camera's fixed pattern is enough), and the camera's loss per pan by its own count.
+  At a second or more each pan is read for twice the exposure plus 1.5 s, long enough for a stall
+  timeout to fire.
 - **stall**: 20 stop / reconfigure / start cycles on one handle (depth alternating, window stepping
   64 px, 3 s each); a stall must come back as an error within about 2 s and `ResetDevice` then a fresh
   open must stream; one deliberate reset either way; then two 200 ms single exposures at the highest
