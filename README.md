@@ -212,10 +212,11 @@ evidently restarting the transfer, so a start costs about 200 ms and a stop 250 
 - **A stream refuses what it cannot do mid-stream**: `StartLightExposure`, `SetROIFormat` and
   `GetDataAfterExposure` answer `VideoModeActive`, and `StartVideoCapture` during an exposure
   `ExposureInProgress`.
-- **`CanPanRoiWhileStreaming` is true.** `put_Roi` moves the window of a running stream (the G3M678M
-  is a `TOUPCAM_FLAG_ROI_HARDWARE` body): in 30 pans of 64 px at 197 fps the picture moved by exactly
-  64 px every time, the camera's frame count went on unbroken with exactly one frame lost per pan,
-  and nothing stalled. The call blocks its caller 32 to 285 ms while the stream runs on into the ring.
+- **`CanPanRoiWhileStreaming` is true on a `TOUPCAM_FLAG_ROI_HARDWARE` body**, such as the G3M678M,
+  where `put_Roi` moves the window of a running stream: in 30 pans of 64 px at 197 fps the picture
+  moved by exactly 64 px every time, the camera's frame count went on unbroken with exactly one frame
+  lost per pan, and nothing stalled. The call blocks its caller 32 to 285 ms while the stream runs on
+  into the ring. A body without a hardware window answers false, since nothing was measured on one.
 - **`BandwidthOverload` is the speed level** (`put_Speed`, 0 to `get_MaxSpeed`, 2 here and the
   camera's own default), NOT a percentage: the SDK manual equates the levels with the camera's share
   of the link, which is what the DAL's control means, and TianWen's video loop takes the maximum for

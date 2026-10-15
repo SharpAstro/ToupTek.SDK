@@ -399,13 +399,15 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
     public bool CanVideoCapture => _entry?.Brand.Api is not null;
 
     /// <summary>
-    /// True: <c>put_Roi</c> moves the window of a running stream. Measured on the G3M678M (a
-    /// <c>TOUPCAM_FLAG_ROI_HARDWARE</c> body), ten 64 px pans at 197 frames a second: the picture moved
-    /// by exactly 64 px every time, the call blocked 33 ms, the stream paused 34 ms and went on with
-    /// the camera's frame count unbroken (no restart, which costs 200 ms here), no stall, and each pan
-    /// cost exactly one frame, which <see cref="TryGetDroppedFrames"/> counts.
+    /// True on a body with a hardware window (<c>TOUPCAM_FLAG_ROI_HARDWARE</c>), where <c>put_Roi</c>
+    /// moves the window of a running stream. Measured on the G3M678M, such a body, ten 64 px pans at
+    /// 197 frames a second: the picture moved by exactly 64 px every time, the call blocked 33 ms, the
+    /// stream paused 34 ms and went on with the camera's frame count unbroken (no restart, which costs
+    /// 200 ms here), no stall, and each pan cost exactly one frame, which
+    /// <see cref="TryGetDroppedFrames"/> counts. False on a body without one, which was not measured: a
+    /// window the SDK crops in software may well restart the stream to move.
     /// </summary>
-    public bool CanPanRoiWhileStreaming => true;
+    public bool CanPanRoiWhileStreaming => Model.Has(FLAG_ROI_HARDWARE);
 
     /// <summary>
     /// Switches the camera to free-running with the window, format and controls set now. Refused
