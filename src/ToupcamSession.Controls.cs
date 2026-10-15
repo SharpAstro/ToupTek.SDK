@@ -214,6 +214,12 @@ internal sealed unsafe partial class ToupcamSession
             _ => E_NOTIMPL,
         };
 
+        // A stream's stall timeouts follow its exposure (OnExposureChanged).
+        if (control is CMOSControlType.Exposure && Succeeded(hr))
+        {
+            OnExposureChanged((uint)value);
+        }
+
         return ToupcamCamera.ToDALError(hr);
     }
 

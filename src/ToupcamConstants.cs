@@ -124,11 +124,12 @@ internal static class ToupcamConstants
     /// </summary>
     /// <remarks>
     /// Both are off by default, which is why <see cref="EVENT_NOFRAMETIMEOUT"/> was handled and could
-    /// never arrive. The SDK arms them against when a frame is DUE, not against wall time: measured on
-    /// a G3M678M 2026-09-23, three 5 s triggered exposures under a 500 ms no-packet and a 1000 ms
-    /// no-frame timeout raised nothing but the frame itself, and 3 s idle between triggers raised
-    /// nothing at all. So a long exposure cannot trip them; a stalled transfer does, as
-    /// <see cref="EVENT_NOPACKETTIMEOUT"/> every ~0.5 s. The values are the SDK minimums doubled
+    /// never arrive. For a TRIGGERED exposure the SDK arms them against when the frame is due, not
+    /// against wall time: measured on a G3M678M 2026-09-23, three 5 s triggered exposures under a
+    /// 500 ms no-packet and a 1000 ms no-frame timeout raised nothing but the frame itself, and 3 s idle
+    /// between triggers raised nothing at all. So a long triggered exposure cannot trip them; a stalled
+    /// transfer does. In VIDEO they count from the last packet, so a stream arms its own, these plus
+    /// the exposure (<c>ToupcamSession.ArmVideoTimeouts</c>). The values are the SDK minimums doubled
     /// (<c>TOUPCAM_NOPACKET_TIMEOUT_MIN</c> and <c>TOUPCAM_NOFRAME_TIMEOUT_MIN</c> are both 500).
     /// </remarks>
     internal const int NOPACKET_TIMEOUT_MS = 1000;
