@@ -434,7 +434,8 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
     /// <see cref="CMOSErrorCode.Success"/> with the frame copied into <paramref name="buffer"/>;
     /// <see cref="CMOSErrorCode.Timeout"/> when none arrived within <paramref name="waitMs"/>, which is not
     /// a failure; <see cref="CMOSErrorCode.GeneralError"/> once the SDK has reported the transfer stalled
-    /// (<c>TOUPCAM_EVENT_NOPACKETTIMEOUT</c> or <c>NOFRAMETIMEOUT</c>, armed at 1 s and 2 s) or a generic
+    /// (<c>TOUPCAM_EVENT_NOPACKETTIMEOUT</c> or <c>NOFRAMETIMEOUT</c>, armed for a stream at its exposure
+    /// plus 1 s and plus 2 s, and re-armed when the exposure changes) or a generic
     /// error, after the frames that came before it: the camera is still attached but no longer sending,
     /// no DAL code names that, and <see cref="ResetDevice"/> is the cure; <see cref="CMOSErrorCode.CameraRemoved"/>
     /// when the SDK reported the camera disconnected; <see cref="CMOSErrorCode.InvalidSequence"/> with no
