@@ -404,8 +404,10 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
     /// 197 frames a second: the picture moved by exactly 64 px every time, the camera's frame count went
     /// on unbroken (no restart, which costs 200 ms here), nothing stalled, and each pan cost exactly one
     /// frame, which <see cref="TryGetDroppedFrames"/> counts. The call blocks its caller 32 to 285 ms
-    /// while the stream runs on into the ring. False on a body without one, which was not measured: a
-    /// window the SDK crops in software may well restart the stream to move.
+    /// while the stream runs on into the ring. At a 3 s exposure (four pans) it does not end the stream
+    /// either: no frame lost and no timeout, but the call blocks about one exposure and the first frame
+    /// of the new window comes about two after it. False on a body without one, which was not measured:
+    /// a window the SDK crops in software may well restart the stream to move.
     /// </summary>
     public bool CanPanRoiWhileStreaming => Model.Has(FLAG_ROI_HARDWARE);
 
