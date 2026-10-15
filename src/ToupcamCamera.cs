@@ -355,6 +355,18 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
         return ToDALError(session.Configure(width, height, bin, pixelDataFormat is PixelDataFormat.RAW16), CMOSErrorCode.InvalidSize);
     }
 
+    /// <summary>
+    /// Steps of 2 for the window's origin and size, in binned photosites. <c>put_Roi</c> takes even
+    /// offsets and sizes only (in sensor photosites), and the SDK rounds a binned frame down to an even
+    /// size too (its manual's "640/3 to get 212"), so an odd value is not refused but silently rounded
+    /// down: a caller sizing its buffer from the window it asked for would read every row of a 641-wide
+    /// frame one pixel out, sheared. Even binned values stay even in sensor photosites at every bin.
+    /// </summary>
+    public void GetRoiSteps(out int widthStep, out int heightStep, out int originStepX, out int originStepY)
+    {
+        widthStep = heightStep = originStepX = originStepY = 2;
+    }
+
     // ---- The frame ------------------------------------------------------------------------------
 
     public CMOSErrorCode GetDataAfterExposure(IntPtr buffer, int bufferSize)

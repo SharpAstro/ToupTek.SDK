@@ -234,6 +234,8 @@ Things that are easy to get wrong, each handled once in `ToupcamSession`:
   corrections. RAW mode applies no white balance, so none is reported.
 - **`put_Roi` takes SENSOR coordinates** even under digital binning; the DAL's are binned, so the
   session multiplies back. The size wins over a stale start, since the DAL sets size before start.
+  Offsets and sizes must be even, and an odd one is rounded down rather than refused, so
+  `GetRoiSteps` declares steps of 2 for all four, and a caller snaps to them.
 - **The DAL's device type is a struct**, copied freely, while a ToupTek camera has live state (the
   handle, the ready flag). The struct carries only a key into a reference-counted session registry.
 
