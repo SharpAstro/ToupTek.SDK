@@ -117,18 +117,34 @@ Measured 2026-10-15 through the DAL's video members (`tools/ToupcamVideoProbe`, 
 - **The first handle opened after a reset reads garbage frame info**: the sequence number and the
   timestamp cycle through five fixed values (0, 16777984, 16777216, 65537, 65792) while the pixels and
   the rate are fine. The session therefore opens twice after a reset, which costs about a second, once.
-- **A hard flush made stalls far more frequent.** `TOUPCAM_OPTION_FLUSH = 3` (or 1) empties the camera's
-  DDR; done beside each switch into and out of video it stalled 12 of 20 streams of 30 to 60 s. The
-  binding flushes soft (2, the library's queue only), and a single exposure straight after a stream
-  still reads its own frame (below).
-- **The rate of stalls changes over a day, and is the camera's, not this binding's.** No thread
-  priority (`TOUPCAM_OPTION_THREAD_PRIORITY` 3, a High priority class) or queue depth
-  (`FRONTEND_DEQUE_LENGTH` 16) removed them. Around 10:00 the vendor's own binding (`reference/toupcam.cs`,
-  TIA1's recipe) streamed 10 of 10 runs of 30 s clean and this binding 5 of 5, with no stall in 20
-  stop / reconfigure / start cycles; from 10:30, with the machine at 100 percent CPU from other work,
-  this binding stalled 4 of 5 runs of 60 s and the vendor's binding 9 of 10, with or without a
-  bit-depth change, and after a reset too. So a caller of a ToupTek stream has to expect stalls: on
-  any answer but `Success` or `Timeout`, reset the camera and start again.
+- **The flush is soft** (`TOUPCAM_OPTION_FLUSH = 2`, the library's queue only), leaving the camera's
+  DDR alone, because the hard flush (3, or 1) has nothing to catch: a single exposure straight after
+  a stream reads its own frame (below). The hard flush was suspected of the stalls first, having
+  stalled 12 of 20 streams of 30 to 60 s one morning, but later periods stalled as often without it.
+- **The stalls come in periods, they are the camera's, and nothing tried here prevents them.** A run of
+  the vendor's own binding (`reference/toupcam.cs`, TIA1's recipe, no flush at all) and of this binding
+  side by side gave the same picture through the day:
+
+  | Time (2026-10-15) | This binding | Vendor's binding |
+  |---|---|---|
+  | 09:44 to 09:55 (hard flush then) | 12 of 20 streams of 30 to 60 s stalled | |
+  | 10:00 to 10:12 | 0 of 5 runs of 30 s, 0 in 20 cycles | 0 of 10 runs of 30 s |
+  | 10:19 to 10:32 | 5 of 10 runs of 60 s, 2 in 44 cycles | |
+  | 10:36 to 10:47 | | 13 of 15 runs of 60 s, the last three, right after a reset, delivering nothing |
+  | 11:17, straight after a reset | 0 of 5 runs of 60 s, 0 in 20 cycles, 0 in 10 pans | |
+  | 11:26 | 5 of 5 runs of 60 s | |
+
+  A reset gives a clean spell, and within minutes to an hour the camera slides into stalling again.
+  Not the machine's load: 11:17 and 11:26 ran at the same 100 percent CPU. Not thread priority
+  (`TOUPCAM_OPTION_THREAD_PRIORITY` 3, a High priority class) or queue depth (`FRONTEND_DEQUE_LENGTH`
+  16), which were tried, nor a bit-depth change on the running stream, which stalled no more often
+  than none. So a caller of a ToupTek stream has to expect stalls: on any answer but `Success` or
+  `Timeout`, reset the camera and start again. The probe's stress (some 25 stalls, a dozen resets and
+  hard flushes) may itself have pushed this body into its bad periods; that is not ruled out.
+- **At 2 ms some frames come with garbage info**, and the next good sequence number then skips one:
+  13 in a 60 s run at 2 ms, 6 in the 31 s of another, none at 5 ms in the same sessions. Each is
+  counted as one frame lost, which is what the camera's count says; none was the ring's (it discarded
+  nothing).
 
 ## How capture works
 
@@ -218,9 +234,11 @@ dotnet run --project tools/ToupcamVideoProbe -c Release -- stall --cycles 50
   gain straight after a stream, which must agree and must not read like the stream.
 
 Exit code 0 when everything passed, 1 when anything failed, 2 with no camera. Measured 2026-10-15 on
-the G3M678M, when it did not stall: **196.8 fps** in 8 bits at 5 ms (`get_FrameRate` 197.3), **98.3**
-in 16 bits, **200.6** at 2 ms, each with 0 dropped over 60 s; see "Stalls under video" for when it
-did.
+the G3M678M, straight after a reset (11:17): **196.8 fps** in 8 bits at 5 ms on three fresh opens
+(`get_FrameRate` 197.2 to 197.4), **98.3** in 16 bits, each with 0 dropped and no stall over 60 s;
+**200.4** at 2 ms with 13 dropped (garbage frame info, above); ten pans at 33 ms each, one frame lost
+apiece; no stall in 20 cycles; the single exposures each reading their own frame. See "Stalls under
+video" for the periods when it stalled.
 
 ## Vendor drops
 

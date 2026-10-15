@@ -182,7 +182,8 @@ internal sealed unsafe partial class ToupcamSession
     /// after a stream read its own frame (the brightest 0.1 percent at 95 ADU, against the stream's
     /// 15).</para>
     /// <para><b>The flush is soft</b> (<see cref="FLUSH_SOFT"/>, the library's queue only): the hard
-    /// one, which empties the camera's DDR, is what made streams stall on this body.</para>
+    /// one, which empties the camera's DDR, has nothing to catch, so the camera's memory is left
+    /// alone.</para>
     /// <para>On a camera that has already stalled, the switch back blocks about 5 s inside the SDK
     /// before it returns, and still succeeds.</para>
     /// </remarks>
