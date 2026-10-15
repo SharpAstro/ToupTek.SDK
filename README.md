@@ -86,11 +86,16 @@ re-enumerated under the same serial and streamed again after 2.8 s (0.6 s on ano
 
 What the binding does about it:
 
-- **Both timeouts are armed on every stream** (no-packet 1 s, no-frame 2 s), and either one, as well
-  as a trigger failure or a generic error, fails the exposure in progress. For a TRIGGERED exposure
-  the SDK arms them against when the frame is due, not wall time: three 5 s triggered exposures under
+- **Both timeouts are armed at open** (no-packet 1 s, no-frame 2 s), and either one, as well as a
+  trigger failure or a generic error, fails the exposure in progress. For a TRIGGERED exposure the
+  SDK arms them against when the frame is due, not wall time: three 5 s triggered exposures under
   tighter values (0.5 s and 1 s) raised nothing but the frame, and 3 s idle between triggers raised
-  nothing. A video stream is different, below.
+  nothing. A video stream arms its own, below.
+- **The reset is exposed as the DAL's `ResetDevice()`** (`CanResetDevice` is true), and never fired
+  from here. TianWen's DAL camera driver gives up a frame the camera never delivers at a deadline, and
+  resets the camera before the next exposure after two losses in a row, then finds it again and
+  restores its gain, offset, white balance and cooler. A lost trigger with no event can only be caught
+  by that deadline, which is why it lives in the driver rather than here.
 
 ### Long exposures under video
 
@@ -117,11 +122,6 @@ appears to wait out the exposure in flight, and the stop's own wait for the came
 twice the exposure plus 50 ms, capped at 3 s. In 55 traced stops at short exposures no frame arrived
 after the switch, so the cap could likely come down; that is not measured at long exposures, so it
 stays.
-- **The reset is exposed as the DAL's `ResetDevice()`** (`CanResetDevice` is true), and never fired
-  from here. TianWen's DAL camera driver gives up a frame the camera never delivers at a deadline, and
-  resets the camera before the next exposure after two losses in a row, then finds it again and
-  restores its gain, offset, white balance and cooler. A lost trigger with no event can only be caught
-  by that deadline, which is why it lives in the driver rather than here.
 
 ### Stalls under video
 
