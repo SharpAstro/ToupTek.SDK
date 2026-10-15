@@ -227,8 +227,9 @@ evidently restarting the transfer, so a start costs about 200 ms and a stop 250 
   camera's own default), NOT a percentage: the SDK manual equates the levels with the camera's share
   of the link, which is what the DAL's control means, and TianWen's video loop takes the maximum for
   a stream and gives back what it found. ZWO's 40 to 100 is refused rather than mapped, so the 50
-  TianWen writes at connect leaves the camera at its fastest level. Setting it is instant (1 ms), no
-  restart. **`HighSpeedMode` is not offered**: on ZWO it trades converter depth for speed, which this
+  TianWen writes at connect leaves the camera at its fastest level. Setting it takes 8.5 to 9.3 ms
+  on a running video stream (speedstep, below) and about 1 ms between streams, with no restart
+  either way. **`HighSpeedMode` is not offered**: on ZWO it trades converter depth for speed, which this
   SDK has no way to do, and mapping it onto the same `put_Speed` would make two DAL controls one knob,
   TianWen's `HighSpeedMode = 0` at connect then dropping every single exposure to the slowest level.
 
