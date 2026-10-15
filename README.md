@@ -107,10 +107,15 @@ Measured 2026-10-15 through the DAL's video members (`tools/ToupcamVideoProbe`, 
   longer sending", `Timeout` would have the caller ask for ever, and `CameraRemoved` would claim a
   cause the SDK did not report. Every stall seen (over 20) surfaced 1.03 to 1.06 s after the last
   frame, the 1 s no-packet timeout, and none went silent.
-- **A reset brings it back, usually.** `ResetDevice` and a fresh open streamed again 9 of the 10
-  times the probe tried it (1.3 to 2.5 s to reopen; the tenth, before the double open below, stalled
-  again after 304 frames), but the vendor's own binding has also seen a reset camera stream 60 s,
-  stall, and then deliver nothing on three fresh opens running.
+- **A restart is usually enough, a reset the last resort.** A stop and start of the stream on the same
+  handle brought 10 of 11 stalls in the soak back (below), each 6.5 s from the last frame to the first
+  again: 1 s to notice, about 5.2 s in the stop, the rest the start. The eleventh did not come back on
+  a restart nor on a close and open, and did on `ResetDevice`, 30.4 s in all. Nudging the stalled
+  stream instead (the speed level, or the window by 2 px, and back) brought none of three back.
+  `ResetDevice` and a fresh open streamed again 9 of the 10 times the probe tried it on its own (1.3
+  to 2.5 s to reopen; the tenth, before the double open below, stalled again after 304 frames), but
+  the vendor's own binding has also seen a reset camera stream 60 s, stall, and then deliver nothing
+  on three fresh opens running.
 - **`StopVideoCapture` on a stalled camera blocks about 5 s** inside the SDK (the switch back to
   trigger mode waits on the dead transfer) and still succeeds. A stall that begins in the last second
   of a stream shows only as that slow stop.
@@ -134,17 +139,20 @@ Measured 2026-10-15 through the DAL's video members (`tools/ToupcamVideoProbe`, 
   | 11:17, straight after a reset | 0 of 5 runs of 60 s, 0 in 20 cycles, 0 in 10 pans | |
   | 11:26 | 5 of 5 runs of 60 s | |
 
-  A reset gives a clean spell, and within minutes to an hour the camera slides into stalling again.
-  Not the machine's load: 11:17 and 11:26 ran at the same 100 percent CPU. Not thread priority
-  (`TOUPCAM_OPTION_THREAD_PRIORITY` 3, a High priority class) or queue depth (`FRONTEND_DEQUE_LENGTH`
-  16), which were tried, nor a bit-depth change on the running stream, which stalled no more often
-  than none. So a caller of a ToupTek stream has to expect stalls: on any answer but `Success` or
-  `Timeout`, reset the camera and start again. The probe's stress (some 25 stalls, a dozen resets and
-  hard flushes) may itself have pushed this body into its bad periods; that is not ruled out.
-- **At 2 ms some frames come with garbage info**, and the next good sequence number then skips one:
-  13 in a 60 s run at 2 ms, 6 in the 31 s of another, none at 5 ms in the same sessions. Each is
-  counted as one frame lost, which is what the camera's count says; none was the ring's (it discarded
-  nothing).
+  They cluster, with no fixed relation to a reset: after the soak's reset, eight in the first nine
+  minutes and none in the next nineteen; after the recover arm's, none for thirteen minutes and three
+  in the next seven. Not the machine's load: 11:17 and 11:26 ran at the same 100 percent CPU. Not
+  thread priority (`TOUPCAM_OPTION_THREAD_PRIORITY` 3, a High priority class) or queue depth
+  (`FRONTEND_DEQUE_LENGTH` 16), which were tried, nor a bit-depth change on the running stream, which
+  stalled no more often than none. So a caller of a ToupTek stream has to expect stalls, with no
+  warning (below): on any answer but `Success` or `Timeout`, stop and start the stream, then close and
+  open, then reset. The probe's stress (some 35 stalls, a dozen resets and hard flushes) may itself
+  have pushed this body into its bad periods; that is not ruled out.
+- **Frames are lost only where the readout sets the rate**, as a frame with garbage info whose next
+  good sequence number skips one: at 2 ms at every speed level, and at 5 ms at levels 1 and 0, whose
+  480 rows take 7.6 and 10.2 ms; never at 15 ms, and never at 5 ms at level 2, whose readout (4.98 ms)
+  fits inside the exposure (below). Each is counted as one frame lost, which is what the camera's
+  count says; none was the ring's (it discarded nothing).
 
 ## How capture works
 
@@ -216,15 +224,19 @@ top. It needs the camera, holds it for minutes and resets it, so CI does not run
 else holding the camera:
 
 ```bash
-dotnet run --project tools/ToupcamVideoProbe -c Release -- all      # or rate | stall | pan
+dotnet run --project tools/ToupcamVideoProbe -c Release -- all      # rate, pan and stall
 dotnet run --project tools/ToupcamVideoProbe -c Release -- rate --seconds 30
 dotnet run --project tools/ToupcamVideoProbe -c Release -- stall --cycles 50
+dotnet run --project tools/ToupcamVideoProbe -c Release -- speedstep
+dotnet run --project tools/ToupcamVideoProbe -c Release -- soak --rounds 4 --segment 60
+dotnet run --project tools/ToupcamVideoProbe -c Release -- recover --rounds 10 --segment 60
 ```
 
 - **rate**: 640x480 at (1716, 546), gain 2252, 1 s settling then 60 s counted, each run on a fresh
   open: three in 8 bits at 5 ms, one in 16 bits, one in 8 bits at 2 ms. Per run: frames, fps by
-  `Stopwatch`, `get_FrameRate`, `TryGetDroppedFrames`, stalls. Passes at 190 fps (90 in 16 bits), 0
-  dropped, no stall.
+  `Stopwatch`, `get_FrameRate`, `TryGetDroppedFrames`, stalls. Passes at 190 fps (90 in 16 bits), no
+  stall, and at most one frame dropped in 1,800: SharpCap's on this camera (about 55 in nearly
+  100,000, the night of 2026-10-07).
 - **pan**: ten 64 px `SetStartPosition` moves mid-stream; the shift of the picture is measured by
   matching 16-frame averages (a capped camera's fixed pattern is enough), and the camera's loss per
   pan by its own count.
@@ -232,13 +244,68 @@ dotnet run --project tools/ToupcamVideoProbe -c Release -- stall --cycles 50
   64 px, 3 s each); a stall must come back as an error within about 2 s and `ResetDevice` then a fresh
   open must stream; one deliberate reset either way; then two 200 ms single exposures at the highest
   gain straight after a stream, which must agree and must not read like the stream.
+- **speedstep**: the speed level changed eight times on a running 5 ms stream.
+- **soak**: every exposure (5, 15, 2 ms) at every speed level, 8 bits, in 60 s segments round-robin
+  from a reset; stalls recovered by the cheapest of restart, reopen and reset, each timed; a table of
+  rate, delivered rate (frames over streaming plus recovery time), drops, stalls per hour, and drops in
+  the 10 s before each stall.
+- **recover**: 5 ms at the top two speed levels, alternating, and a stall nudged (the speed level,
+  then the window) before it is stopped.
 
 Exit code 0 when everything passed, 1 when anything failed, 2 with no camera. Measured 2026-10-15 on
 the G3M678M, straight after a reset (11:17): **196.8 fps** in 8 bits at 5 ms on three fresh opens
 (`get_FrameRate` 197.2 to 197.4), **98.3** in 16 bits, each with 0 dropped and no stall over 60 s;
-**200.4** at 2 ms with 13 dropped (garbage frame info, above); ten pans at 33 ms each, one frame lost
-apiece; no stall in 20 cycles; the single exposures each reading their own frame. See "Stalls under
-video" for the periods when it stalled.
+**200.4** at 2 ms with 13 dropped (1 in 925, short of the bar; garbage frame info, above); ten pans at
+33 ms each, one frame lost apiece; no stall in 20 cycles; the single exposures each reading their own
+frame. See "Stalls under video" for the periods when it stalled.
+
+## The speed level, and whether to adapt it
+
+Measured 2026-10-15 with the probe's speedstep, soak (11:43, 36 min) and recover (12:23, 20 min)
+arms, 8 bits at the Saturn window, gain 2252. The question was whether a caller should adapt the
+bandwidth the way TCP adapts its window (back off on trouble, creep back up when clean), and what a
+stall costs.
+
+**Changing the level is cheap.** On a running 5 ms stream, eight changes took 8.5 to 9.3 ms each, the
+first frame came straight after, the longest gap was 32 ms, the camera lost 0 or 1 frame, and the
+rate a second later was the new level's (200, 133 or 100 fps). No restart, no stall.
+
+**What each cell gave** (soak and recover together; "delivered" counts the time stalls cost):
+
+| Exposure, level | Streamed | fps | Delivered fps | Dropped | Stalls |
+|---|---|---|---|---|---|
+| 5 ms, 2 | 795 s | 197.1 | 186.7 | 0 in 156,762 | 4 |
+| 5 ms, 1 | 824 s | 131.2 | 128.8 | 19 in 108,179 (1 in 5,694) | 1 |
+| 5 ms, 0 | 240 s | 98.5 | 98.5 | 6 in 23,653 (1 in 3,942) | 0 |
+| 15 ms, 2 | 227 s | 66.4 | 62.7 | 0 | 2 |
+| 15 ms, 1 | 240 s | 66.1 | 66.1 | 0 | 0 |
+| 15 ms, 0 | 233 s | 66.0 | 64.3 | 0 | 1 |
+| 2 ms, 2 | 227 s | 201.1 | 189.9 | 2 in 45,619 | 2 |
+| 2 ms, 1 | 240 s | 131.2 | 131.2 | 4 in 31,485 | 0 |
+| 2 ms, 0 | 210 s | 98.5 | 85.9 | 2 in 20,644 | 1 (needed a reset) |
+
+The recover arm's two stalls at level 2 took 15.9 s each to undo, because it tried the nudges first;
+recovered by a restart alone, as in the soak, they would have cost 6.5 s and the delivered rate at
+5 ms, level 2 would read 190.9.
+
+- **At 5 ms the level IS the frame rate**, and level 2 delivers the most frames even counting its
+  stalls: 186.7 against 128.8. It loses to level 1 only if stalls come more often than one in 20 s
+  (each costing 6.5 s), about ten times the rate measured, and more than even the worst minute
+  (two stalls). Backing off at 5 ms costs a third of the frames to save about 3 percent.
+- **Where the exposure sets the rate (15 ms), the level costs nothing**: 66 fps at all three. Level 1
+  stalled least overall (1 in 1,304 s, against level 2's 8 in 1,249 s and level 0's 2 in 683 s), but
+  one stall against eight is thin, and level 0 shows a lower level is not steadier as such.
+- **Frames are dropped only where the readout sets the rate**, and all of it is within SharpCap's bar
+  except at 2 ms, the camera's ceiling.
+- **Nothing warns of a stall**: none of 11 stalls had a frame dropped in the 10 s before it, so a
+  back-off driven by losses would never fire in time.
+- **Recovery**: a restart on the same handle, 10 of 11, 6.5 s each; a reset, 1 of 11, 30.4 s; a nudge
+  of the speed level or the window, 0 of 3, and about 9 s added.
+
+So on this camera an adaptive bandwidth does not pay at 5 ms, and has no early signal to act on. What
+does pay: recovering a stall automatically and quickly (restart, then reopen, then reset), and, where
+the exposure is longer than the readout at a lower level, taking the lowest such level, which costs
+no frames and may stall less.
 
 ## Vendor drops
 
