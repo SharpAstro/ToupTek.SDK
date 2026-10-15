@@ -29,6 +29,9 @@ internal static class Program
 
     private static readonly TimeSpan ReappearTimeout = TimeSpan.FromSeconds(15);
 
+    /// <summary>A rate run passes with at most one frame dropped in this many: SharpCap's on this camera.</summary>
+    private const int DropBar = 1800;
+
     /// <summary>Time since the probe last reset the camera, for the soak's stall lines.</summary>
     private static readonly Stopwatch SinceReset = new Stopwatch();
 
@@ -93,9 +96,14 @@ internal static class Program
 
     /// <summary>
     /// Three 60 s runs at the Saturn region in 8 bits at 5 ms, each on a fresh open, then one in 16 bits
-    /// and one at 2 ms. A run passes at 190 frames a second or more (90 in 16 bits) with nothing dropped
-    /// and no stall.
+    /// and one at 2 ms. A run passes at 190 frames a second or more (90 in 16 bits), no stall, and no
+    /// more than one frame dropped in <see cref="DropBar"/>.
     /// </summary>
+    /// <remarks>
+    /// The bar is SharpCap's on this camera, the night of 2026-10-07 (about 55 frames dropped in nearly
+    /// 100,000, at 15 ms): some frames lost is fine for a planetary stack, more than SharpCap loses is
+    /// not.
+    /// </remarks>
     private static bool RateArm(TimeSpan duration)
     {
         Console.WriteLine();
@@ -118,10 +126,11 @@ internal static class Program
             {
                 Configure(camera, run.Bits16, run.ExposureUs, RoiX, RoiY);
                 var result = Stream(camera, run.Bits16, TimeSpan.FromSeconds(1), duration);
-                var passed = result.Stall is null && result.Fps >= run.MinFps && result.Dropped == 0;
+                var passed = result.Stall is null && result.Fps >= run.MinFps && result.Dropped is { } lost && lost * DropBar <= result.Frames;
                 ok &= passed;
+                var oneIn = result.Dropped is > 0 ? $" (1 in {result.Frames / result.Dropped.Value})" : "";
                 Console.WriteLine($"run {i + 1}: {run.Label}: {result.Frames} frames in {result.Seconds:F2} s = {result.Fps:F1} fps by Stopwatch; "
-                    + $"get_FrameRate {Format(result.SdkFps)}; dropped {Format(result.Dropped)}; stalls {(result.Stall is null ? 0 : 1)}{Describe(result)}; "
+                    + $"get_FrameRate {Format(result.SdkFps)}; dropped {Format(result.Dropped)}{oneIn}; stalls {(result.Stall is null ? 0 : 1)}{Describe(result)}; "
                     + $"timeouts {result.Timeouts}; mean {result.MeanAdu:F1} ADU; stop {result.StopCode} in {result.StopMs:F0} ms  {(passed ? "PASS" : "FAIL")}");
             }
             finally
