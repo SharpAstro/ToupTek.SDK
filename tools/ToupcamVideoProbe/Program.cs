@@ -29,17 +29,22 @@ internal static class Program
 
     private static readonly TimeSpan ReappearTimeout = TimeSpan.FromSeconds(15);
 
+    /// <summary>Time since the probe last reset the camera, for the soak's stall lines.</summary>
+    private static readonly Stopwatch SinceReset = new Stopwatch();
+
     private static int Main(string[] args)
     {
         var arm = args.Length > 0 ? args[0].ToLowerInvariant() : "";
-        if (arm is not ("rate" or "stall" or "pan" or "all"))
+        if (arm is not ("rate" or "stall" or "pan" or "all" or "soak" or "speedstep"))
         {
-            Console.WriteLine("usage: ToupcamVideoProbe rate|stall|pan|all [--seconds N] [--cycles N]");
+            Console.WriteLine("usage: ToupcamVideoProbe rate|stall|pan|all|soak|speedstep [--seconds N] [--cycles N] [--rounds N] [--segment S]");
             return 1;
         }
 
         var seconds = IntOption(args, "--seconds", 60);
         var cycles = IntOption(args, "--cycles", 20);
+        var rounds = IntOption(args, "--rounds", 4);
+        var segment = IntOption(args, "--segment", 60);
 
         Console.WriteLine($"ToupcamVideoProbe {arm}, {DateTime.Now:yyyy-MM-dd HH:mm}, SDK {ToupcamBrand.ToupTek.Api?.SdkVersion ?? "(not loaded)"}");
         if (Find() is not { } found)
@@ -64,6 +69,16 @@ internal static class Program
         if (arm is "stall" or "all")
         {
             ok &= StallArm(cycles);
+        }
+
+        if (arm is "speedstep")
+        {
+            ok &= SpeedStepArm();
+        }
+
+        if (arm is "soak")
+        {
+            ok &= SoakArm(rounds, TimeSpan.FromSeconds(segment));
         }
 
         Console.WriteLine(ok ? "ALL PASSED" : "SOME CHECKS FAILED");
@@ -446,6 +461,326 @@ internal static class Program
         return (best.Shift, best.Score > 0 ? median / best.Score : double.PositiveInfinity);
     }
 
+    // ---- Speed step ----------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Changes the speed level of a running 5 ms stream eight times and measures what each change
+    /// costs: how long the call blocks, how long the frames stop, how many the camera loses, the rate a
+    /// second later, and any stall. An adaptive bandwidth wants this cheap, and without a restart.
+    /// </summary>
+    private static bool SpeedStepArm()
+    {
+        Console.WriteLine();
+        Console.WriteLine("== speedstep: BandwidthOverload (the speed level) changed on a running stream, 8-bit, 5 ms, 2 s per level");
+        var camera = OpenFresh();
+        var frameBytes = RoiWidth * RoiHeight;
+        var buffer = Marshal.AllocHGlobal(frameBytes);
+        var ok = true;
+        try
+        {
+            Configure(camera, false, 5000, RoiX, RoiY);
+            Check(camera.StartVideoCapture(), "start the stream");
+            var clock = Stopwatch.StartNew();
+            var settled = ReadFor(camera, buffer, frameBytes, clock, TimeSpan.FromSeconds(2), null);
+            if (settled is not null)
+            {
+                Console.WriteLine($"the stream ended before the first step: {settled}");
+                return false;
+            }
+
+            foreach (var level in new[] { 1, 2, 0, 2, 1, 0, 1, 2 })
+            {
+                _ = camera.TryGetDroppedFrames(out var droppedBefore);
+                var arrivals = new List<double>();
+                var calledAt = clock.Elapsed.TotalMilliseconds;
+                var code = camera.SetControlValue(CMOSControlType.BandwidthOverload, level);
+                var callMs = clock.Elapsed.TotalMilliseconds - calledAt;
+                var ended = ReadFor(camera, buffer, frameBytes, clock, TimeSpan.FromSeconds(2), arrivals);
+                var counted = camera.TryGetDroppedFrames(out var droppedAfter);
+                var firstAfter = arrivals.Count > 0 ? arrivals[0] - calledAt : double.NaN;
+                var gaps = arrivals.Zip(arrivals.Skip(1), (a, b) => b - a).ToList();
+                var longest = gaps.Count > 0 ? Math.Max(gaps.Max(), firstAfter) : double.NaN;
+                var settledFps = arrivals.Count(t => t - calledAt >= 1000);
+                var held = code is CMOSErrorCode.Success && ended is null;
+                ok &= held;
+                Console.WriteLine($"to level {level}: {code} in {callMs:F1} ms; first frame after {firstAfter:F1} ms, longest gap {longest:F1} ms; "
+                    + $"{settledFps} fps in the second after; camera lost {(counted ? (droppedAfter - droppedBefore).ToString(CultureInfo.InvariantCulture) : "n/a")}"
+                    + $"{(ended is null ? "" : "; STREAM ENDED " + ended)}");
+                if (ended is not null)
+                {
+                    break;
+                }
+            }
+
+            _ = camera.StopVideoCapture();
+            Console.WriteLine($"speedstep summary: {(ok ? "the speed level changes on a running stream" : "a change did NOT hold")}  {(ok ? "PASS" : "FAIL")}");
+            return ok;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+            _ = camera.Close();
+        }
+    }
+
+    // ---- Soak ----------------------------------------------------------------------------------------
+
+    /// <summary>One cell of the soak matrix and everything measured in it.</summary>
+    private sealed class SoakCell(int exposureUs, int speed)
+    {
+        public int ExposureUs { get; } = exposureUs;
+        public int Speed { get; } = speed;
+        public string Label => $"{ExposureUs / 1000.0,4:0.#} ms, speed {Speed}";
+        public double Seconds;
+        public long Frames;
+        public long Dropped;
+        public int UnknownDrops;
+        public int Stalls;
+        public int Warned;
+        public int Restarted;
+        public int Reopened;
+        public int Reset;
+        public double RecoverySeconds;
+    }
+
+    /// <summary>
+    /// Every exposure (5, 15 and 2 ms) at every speed level, 8 bits at the Saturn window, in
+    /// <paramref name="segment"/>-long segments taken round-robin for <paramref name="rounds"/> rounds,
+    /// each round starting one cell later, so that every cell samples the camera's good and bad spells
+    /// alike. It starts from a reset. A stall is recovered by the cheapest step that works (the stream
+    /// stopped and started on the same handle, then a close and open, then <c>ResetDevice</c>), each
+    /// timed from the last frame to the first again; per stall, the frames dropped in the 10 s before it
+    /// say whether drops warn of one.
+    /// </summary>
+    private static bool SoakArm(int rounds, TimeSpan segment)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"== soak: 8-bit {RoiWidth}x{RoiHeight} at ({RoiX}, {RoiY}), gain {Gain}; every exposure at every speed level, "
+            + $"{segment.TotalSeconds:F0} s segments round-robin, {rounds} rounds, from a reset");
+        var camera = ResetOnly(OpenFresh());
+        Console.WriteLine($"reset at the start, open again after {SinceReset.Elapsed.TotalSeconds:F1} s");
+        var speeds = camera.TryGetControlRange(CMOSControlType.BandwidthOverload, out var lowest, out var highest)
+            ? Enumerable.Range(lowest, highest - lowest + 1).Reverse().ToArray()
+            : [0];
+        var cells = new[] { 5000, 15000, 2000 }.SelectMany(exposure => speeds.Select(speed => new SoakCell(exposure, speed))).ToList();
+        var completed = true;
+        try
+        {
+            for (var round = 0; round < rounds; round++)
+            {
+                for (var i = 0; i < cells.Count; i++)
+                {
+                    camera = SoakSegment(camera, cells[(i + round) % cells.Count], segment, round + 1);
+                }
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            completed = false;
+            Console.WriteLine($"SOAK ABORTED: {ex.Message}");
+        }
+        finally
+        {
+            _ = camera.Close();
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("| Exposure, speed | Streamed | fps | Dropped | 1 in | Stalls | Per hour | Drops in the 10 s before | Restart | Reopen | Reset | Mean recovery |");
+        Console.WriteLine("|---|---|---|---|---|---|---|---|---|---|---|---|");
+        foreach (var cell in cells)
+        {
+            var oneIn = cell.Dropped > 0 ? (cell.Frames / cell.Dropped).ToString(CultureInfo.InvariantCulture) : "none";
+            Console.WriteLine($"| {cell.Label} | {cell.Seconds:F0} s | {(cell.Seconds > 0 ? cell.Frames / cell.Seconds : 0):F1} | {cell.Dropped}{(cell.UnknownDrops > 0 ? $" (+{cell.UnknownDrops} unknown)" : "")} "
+                + $"| {oneIn} | {cell.Stalls} | {(cell.Seconds > 0 ? cell.Stalls * 3600 / cell.Seconds : 0):F0} | {cell.Warned} of {cell.Stalls} "
+                + $"| {cell.Restarted} | {cell.Reopened} | {cell.Reset} | {(cell.Stalls > 0 ? cell.RecoverySeconds / cell.Stalls : 0):F1} s |");
+        }
+
+        return completed;
+    }
+
+    /// <summary>One segment of one cell: configure, stream, recover from any stall, stop.</summary>
+    private static ToupcamCamera SoakSegment(ToupcamCamera camera, SoakCell cell, TimeSpan span, int round)
+    {
+        var frameBytes = RoiWidth * RoiHeight;
+        var buffer = Marshal.AllocHGlobal(frameBytes);
+        try
+        {
+            Configure(camera, false, cell.ExposureUs, RoiX, RoiY, cell.Speed);
+            Check(camera.StartVideoCapture(), "start the stream");
+            var clock = Stopwatch.StartNew();
+            var lastFrame = TimeSpan.Zero;
+            var recovering = TimeSpan.Zero;
+            long frames = 0, dropped = 0;
+            var lines = new List<string>();
+            // The stream's dropped count once a second, so a stall can say what came in the 10 s before it.
+            var samples = new Queue<(TimeSpan At, int Dropped)>();
+            var nextSample = TimeSpan.Zero;
+            while (clock.Elapsed < span)
+            {
+                var code = camera.GetVideoData(buffer, frameBytes, FrameWaitMs);
+                var now = clock.Elapsed;
+                if (code is CMOSErrorCode.Success)
+                {
+                    frames++;
+                    lastFrame = now;
+                    if (now >= nextSample)
+                    {
+                        samples.Enqueue((now, camera.TryGetDroppedFrames(out var d) ? d : -1));
+                        while (now - samples.Peek().At > TimeSpan.FromSeconds(10.5))
+                        {
+                            _ = samples.Dequeue();
+                        }
+
+                        nextSample = now + TimeSpan.FromSeconds(1);
+                    }
+
+                    continue;
+                }
+
+                if (code is CMOSErrorCode.Timeout && now - lastFrame < SilentStallAfter)
+                {
+                    continue;
+                }
+
+                var latency = now - lastFrame;
+                var streamDropped = camera.TryGetDroppedFrames(out var sd) ? sd : -1;
+                var before = streamDropped >= 0 && samples.Count > 0 && samples.Peek().Dropped >= 0 ? streamDropped - samples.Peek().Dropped : -1;
+                if (streamDropped >= 0)
+                {
+                    dropped += streamDropped;
+                }
+                else
+                {
+                    cell.UnknownDrops++;
+                }
+
+                cell.Stalls++;
+                if (before > 0)
+                {
+                    cell.Warned++;
+                }
+
+                var minutesSinceReset = SinceReset.Elapsed.TotalMinutes;
+                var recoveryStarted = clock.Elapsed;
+                camera = Recover(camera, cell, buffer, frameBytes, out var how);
+                var gap = clock.Elapsed - recoveryStarted + latency;
+                recovering += gap;
+                cell.RecoverySeconds += gap.TotalSeconds;
+                lines.Add($"  stall at {now.TotalSeconds:F1} s ({(code is CMOSErrorCode.Timeout ? "silent" : code.ToString())}, {latency.TotalSeconds:F2} s after the last frame, "
+                    + $"{minutesSinceReset:F1} min after the last reset, {(before >= 0 ? before.ToString(CultureInfo.InvariantCulture) : "n/a")} dropped in the 10 s before): "
+                    + $"{how}, streaming again {gap.TotalSeconds:F1} s after the last frame");
+                lastFrame = clock.Elapsed;
+                samples.Clear();
+                nextSample = TimeSpan.Zero;
+            }
+
+            if (camera.TryGetDroppedFrames(out var tail))
+            {
+                dropped += tail;
+            }
+            else
+            {
+                cell.UnknownDrops++;
+            }
+
+            var streamed = (clock.Elapsed - recovering).TotalSeconds;
+            _ = camera.StopVideoCapture();
+            cell.Seconds += streamed;
+            cell.Frames += frames;
+            cell.Dropped += dropped;
+            Console.WriteLine($"round {round}, {cell.Label}: {frames} frames in {streamed:F1} s = {(streamed > 0 ? frames / streamed : 0):F1} fps, "
+                + $"dropped {dropped}, stalls {lines.Count}, {SinceReset.Elapsed.TotalMinutes:F1} min after the last reset");
+            foreach (var line in lines)
+            {
+                Console.WriteLine(line);
+            }
+
+            return camera;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Brings a stalled stream back by the cheapest step that works: stopped and started on the same
+    /// handle, then closed and opened again, then reset. Each step must produce a frame within 3 s.
+    /// </summary>
+    private static ToupcamCamera Recover(ToupcamCamera camera, SoakCell cell, nint buffer, int frameBytes, out string how)
+    {
+        _ = camera.StopVideoCapture();
+        if (camera.StartVideoCapture() is CMOSErrorCode.Success && FirstFrame(camera, buffer, frameBytes))
+        {
+            cell.Restarted++;
+            how = "restarted on the same handle";
+            return camera;
+        }
+
+        _ = camera.StopVideoCapture();
+        _ = camera.Close();
+        camera = OpenFresh();
+        Configure(camera, false, cell.ExposureUs, RoiX, RoiY, cell.Speed);
+        if (camera.StartVideoCapture() is CMOSErrorCode.Success && FirstFrame(camera, buffer, frameBytes))
+        {
+            cell.Reopened++;
+            how = "closed and opened again";
+            return camera;
+        }
+
+        _ = camera.StopVideoCapture();
+        camera = ResetOnly(camera);
+        Configure(camera, false, cell.ExposureUs, RoiX, RoiY, cell.Speed);
+        if (camera.StartVideoCapture() is CMOSErrorCode.Success && FirstFrame(camera, buffer, frameBytes))
+        {
+            cell.Reset++;
+            how = "reset";
+            return camera;
+        }
+
+        _ = camera.StopVideoCapture();
+        throw new InvalidOperationException($"{cell.Label}: no frame after a restart, a reopen and a reset");
+    }
+
+    /// <summary>Waits up to 3 s for a started stream's first frame; false on any other answer.</summary>
+    private static bool FirstFrame(ToupcamCamera camera, nint buffer, int frameBytes)
+    {
+        var clock = Stopwatch.StartNew();
+        while (clock.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            var code = camera.GetVideoData(buffer, frameBytes, FrameWaitMs);
+            if (code is CMOSErrorCode.Success)
+            {
+                return true;
+            }
+
+            if (code is not CMOSErrorCode.Timeout)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Resets an open camera, waits for it to come back, and opens it again.</summary>
+    private static ToupcamCamera ResetOnly(ToupcamCamera camera)
+    {
+        var reset = camera.ResetDevice();
+        SinceReset.Restart();
+        var clock = Stopwatch.StartNew();
+        while (clock.Elapsed < ReappearTimeout)
+        {
+            Thread.Sleep(200);
+            if (Find() is { } found && found.Open())
+            {
+                return found;
+            }
+        }
+
+        throw new InvalidOperationException($"the camera did not come back within {ReappearTimeout.TotalSeconds:F0} s of a reset ({reset})");
+    }
+
     // ---- Streaming, as TianWen's loop does it ---------------------------------------------------------
 
     private sealed record StreamResult(
@@ -527,16 +862,17 @@ internal static class Program
         }
     }
 
-    private static void Configure(ToupcamCamera camera, bool bits16, int exposureUs, int x, int y)
+    /// <summary>The window, depth, exposure and gain, and the speed level: <paramref name="speed"/>, or
+    /// the top one as TianWen's video loop takes it (the whole bandwidth) when null.</summary>
+    private static void Configure(ToupcamCamera camera, bool bits16, int exposureUs, int x, int y, int? speed = null)
     {
         Check(camera.SetROIFormat(RoiWidth, RoiHeight, 1, bits16 ? PixelDataFormat.RAW16 : PixelDataFormat.RAW8), "set the window size and format");
         Check(camera.SetStartPosition(x, y), "set the window start");
         Check(camera.SetControlValue(CMOSControlType.Exposure, exposureUs), "set the exposure");
         Check(camera.SetControlValue(CMOSControlType.Gain, Gain), "set the gain");
-        // TianWen's video loop takes the whole bandwidth, which on this binding is the top speed level.
         if (camera.TryGetControlRange(CMOSControlType.BandwidthOverload, out _, out var most))
         {
-            Check(camera.SetControlValue(CMOSControlType.BandwidthOverload, most), "set the speed level");
+            Check(camera.SetControlValue(CMOSControlType.BandwidthOverload, speed ?? most), "set the speed level");
         }
     }
 
