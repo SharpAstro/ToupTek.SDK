@@ -87,9 +87,36 @@ re-enumerated under the same serial and streamed again after 2.8 s (0.6 s on ano
 What the binding does about it:
 
 - **Both timeouts are armed on every stream** (no-packet 1 s, no-frame 2 s), and either one, as well
-  as a trigger failure or a generic error, fails the exposure in progress. The SDK arms them against
-  when a frame is due, not wall time: three 5 s triggered exposures under tighter values (0.5 s and
-  1 s) raised nothing but the frame, and 3 s idle between triggers raised nothing.
+  as a trigger failure or a generic error, fails the exposure in progress. For a TRIGGERED exposure
+  the SDK arms them against when the frame is due, not wall time: three 5 s triggered exposures under
+  tighter values (0.5 s and 1 s) raised nothing but the frame, and 3 s idle between triggers raised
+  nothing. A video stream is different, below.
+
+### Long exposures under video
+
+**In video the timeouts count from the last packet**, and the camera sends nothing while it
+exposes, so with trigger mode's 1 s and 2 s a long exposure is a "stall". Measured 2026-10-15 through
+the DAL (`longexp`, below), 640x480 at (1716, 546), 8 bits, read with TianWen's 250 ms wait:
+
+| Run | 1 s / 2 s left armed | Armed from the exposure |
+|---|---|---|
+| (a) a stream at 3 s, 30 s | 0 frames, 5 faults, each 1.03 to 1.04 s after the start | 10 frames, 3.00 s apart, 0 faults |
+| (b) 5 ms, switched to 3 s after 3 s, then 30 s | 1 frame (in flight at 5 ms), 5 faults, each 1.03 to 1.05 s after the last frame | 10 frames at 3 s, 0 faults |
+| (c) 3 s, switched to 5 ms after two long frames, then 30 s | (not run) | 0 faults: the frame in flight came at once, cut short, then 5 ms frames at 196.7 fps |
+
+So a stream arms its own: no-packet at the exposure plus 1 s, no-frame at the exposure plus 2 s,
+when it starts and when the exposure is set while it runs. A longer exposure is armed at once; a
+shorter one only once two more frames have arrived, by the reader (`GetVideoData`), never in the
+SDK's callback, since a camera that finishes the frame in flight would otherwise have it called a
+stall (this one cuts it short, so the wait costs it about 10 ms). The stop puts trigger mode's 1 s and
+2 s back. A real stall during a long exposure is therefore reported about the exposure plus 1 s after
+the last frame.
+
+**Stopping a long-exposure stream is slow**: 6.0 to 6.6 s at 3 s. The switch back to trigger mode
+appears to wait out the exposure in flight, and the stop's own wait for the camera to go quiet is
+twice the exposure plus 50 ms, capped at 3 s. In 55 traced stops at short exposures no frame arrived
+after the switch, so the cap could likely come down; that is not measured at long exposures, so it
+stays.
 - **The reset is exposed as the DAL's `ResetDevice()`** (`CanResetDevice` is true), and never fired
   from here. TianWen's DAL camera driver gives up a frame the camera never delivers at a deadline, and
   resets the camera before the next exposure after two losses in a row, then finds it again and
@@ -230,6 +257,7 @@ dotnet run --project tools/ToupcamVideoProbe -c Release -- stall --cycles 50
 dotnet run --project tools/ToupcamVideoProbe -c Release -- speedstep
 dotnet run --project tools/ToupcamVideoProbe -c Release -- soak --rounds 4 --segment 60
 dotnet run --project tools/ToupcamVideoProbe -c Release -- recover --rounds 10 --segment 60
+dotnet run --project tools/ToupcamVideoProbe -c Release -- longexp --exposure-ms 3000
 ```
 
 - **rate**: 640x480 at (1716, 546), gain 2252, 1 s settling then 60 s counted, each run on a fresh
@@ -251,6 +279,9 @@ dotnet run --project tools/ToupcamVideoProbe -c Release -- recover --rounds 10 -
   the 10 s before each stall.
 - **recover**: 5 ms at the top two speed levels, alternating, and a stall nudged (the speed level,
   then the window) before it is stopped.
+- **longexp**: exposures longer than the stall timeouts (3 s by default, `--exposure-ms`): a stream
+  at it, a 5 ms stream switched to it, and a stream at it switched to 5 ms, each read for 30 s
+  (`--seconds`); every long frame printed with its time, every fault with its time.
 
 Exit code 0 when everything passed, 1 when anything failed, 2 with no camera. Measured 2026-10-15 on
 the G3M678M, straight after a reset (11:17): **196.8 fps** in 8 bits at 5 ms on three fresh opens

@@ -249,15 +249,25 @@ internal sealed unsafe partial class ToupcamSession
         Bits16 = MaxBitDepth > 8 && Succeeded(Api.PutOption(Handle, OPTION_BITDEPTH, 1));
         _ = Api.PutOption(Handle, OPTION_ZERO_PADDING, 0);
         _ = Api.PutAutoExpoEnable(Handle, 0);
-        // Best effort: a model without them still takes frames, it just cannot report a stalled one.
-        _ = Api.PutOption(Handle, OPTION_NOPACKET_TIMEOUT, NOPACKET_TIMEOUT_MS);
-        _ = Api.PutOption(Handle, OPTION_NOFRAME_TIMEOUT, NOFRAME_TIMEOUT_MS);
+        ArmTriggerTimeouts();
         if (!Succeeded(Api.PutOption(Handle, OPTION_TRIGGER, TRIGGER_SOFTWARE)))
         {
             return false;
         }
 
         return Succeeded(Api.StartPullModeWithCallback(Handle, &OnEvent, GCHandle.ToIntPtr(_self)));
+    }
+
+    /// <summary>
+    /// The no-packet and no-frame timeouts for trigger mode, armed at open and again when a video stream
+    /// ends (a stream arms its own, from the exposure).
+    /// </summary>
+    /// <remarks>Best effort: a model without them still takes frames, it just cannot report a stalled
+    /// one.</remarks>
+    private void ArmTriggerTimeouts()
+    {
+        _ = Api.PutOption(Handle, OPTION_NOPACKET_TIMEOUT, NOPACKET_TIMEOUT_MS);
+        _ = Api.PutOption(Handle, OPTION_NOFRAME_TIMEOUT, NOFRAME_TIMEOUT_MS);
     }
 
     /// <summary>Stop before close, and close before freeing the callback context and the video ring:

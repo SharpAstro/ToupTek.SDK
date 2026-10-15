@@ -42,13 +42,14 @@ internal static class Program
     private static int Main(string[] args)
     {
         var arm = args.Length > 0 ? args[0].ToLowerInvariant() : "";
-        if (arm is not ("rate" or "stall" or "pan" or "all" or "soak" or "speedstep" or "recover"))
+        if (arm is not ("rate" or "stall" or "pan" or "all" or "soak" or "speedstep" or "recover" or "longexp"))
         {
-            Console.WriteLine("usage: ToupcamVideoProbe rate|stall|pan|all|soak|speedstep|recover [--seconds N] [--cycles N] [--rounds N] [--segment S]");
+            Console.WriteLine("usage: ToupcamVideoProbe rate|stall|pan|all|soak|speedstep|recover|longexp [--seconds N] [--cycles N] [--rounds N] [--segment S] [--exposure-ms N]");
             return 1;
         }
 
-        var seconds = IntOption(args, "--seconds", 60);
+        var seconds = IntOption(args, "--seconds", arm is "longexp" ? 30 : 60);
+        var exposureMs = IntOption(args, "--exposure-ms", 3000);
         var cycles = IntOption(args, "--cycles", 20);
         var rounds = IntOption(args, "--rounds", 4);
         var segment = IntOption(args, "--segment", 60);
@@ -81,6 +82,11 @@ internal static class Program
         if (arm is "speedstep")
         {
             ok &= SpeedStepArm();
+        }
+
+        if (arm is "longexp")
+        {
+            ok &= LongExposureArm(exposureMs, TimeSpan.FromSeconds(seconds));
         }
 
         if (arm is "soak" or "recover")
@@ -533,6 +539,125 @@ internal static class Program
         {
             Marshal.FreeHGlobal(buffer);
             _ = camera.Close();
+        }
+    }
+
+    // ---- Long exposure -------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Whether a stream whose exposure outlasts the SDK's no-packet (1 s) and no-frame (2 s) timeouts
+    /// survives them: (a) a stream at <paramref name="exposureMs"/> for <paramref name="span"/>; (b) a 5 ms
+    /// stream switched to <paramref name="exposureMs"/> after 3 s and read for <paramref name="span"/>
+    /// more; (c) a stream at <paramref name="exposureMs"/> switched to 5 ms after two long frames, read for
+    /// <paramref name="span"/> more, which must not take the long frame still in flight for a stall.
+    /// Every long frame is printed with its time, and every answer but Success and Timeout with its time
+    /// and the time since the last frame; a fault restarts the stream, so the count says how often.
+    /// </summary>
+    private static bool LongExposureArm(int exposureMs, TimeSpan span)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"== longexp: 8-bit {RoiWidth}x{RoiHeight} at ({RoiX}, {RoiY}), gain {Gain}, {exposureMs} ms exposures against the SDK's stall timeouts, read with a {FrameWaitMs} ms wait");
+        var camera = OpenFresh();
+        try
+        {
+            var longUs = exposureMs * 1000;
+            var a = LongExposureRun(camera, $"(a) a stream at {exposureMs} ms", longUs, null, TimeSpan.Zero, span);
+            var b = LongExposureRun(camera, $"(b) a 5 ms stream changed to {exposureMs} ms after 3 s", 5000, longUs, TimeSpan.FromSeconds(3), span);
+            var after = TimeSpan.FromMilliseconds(2 * exposureMs + exposureMs / 3);
+            var c = LongExposureRun(camera, $"(c) a stream at {exposureMs} ms changed to 5 ms after {after.TotalSeconds:F1} s", longUs, 5000, after, span);
+            return a && b && c;
+        }
+        finally
+        {
+            _ = camera.Close();
+        }
+    }
+
+    private static bool LongExposureRun(ToupcamCamera camera, string label, int startUs, int? switchToUs, TimeSpan switchAfter, TimeSpan span)
+    {
+        const int LongUs = 1_000_000;
+        var frameBytes = RoiWidth * RoiHeight;
+        var buffer = Marshal.AllocHGlobal(frameBytes);
+        try
+        {
+            Console.WriteLine(label + ":");
+            Configure(camera, false, startUs, RoiX, RoiY);
+            Check(camera.StartVideoCapture(), "start the stream");
+            var clock = Stopwatch.StartNew();
+            var end = switchAfter + span;
+            var exposureUs = startUs;
+            TimeSpan? switchedAt = null;
+            long longFrames = 0, shortFrames = 0, framesSinceSwitch = 0;
+            var faults = 0;
+            var lastFrame = TimeSpan.Zero;
+            while (clock.Elapsed < end)
+            {
+                if (switchToUs is { } to && switchedAt is null && clock.Elapsed >= switchAfter)
+                {
+                    var set = camera.SetControlValue(CMOSControlType.Exposure, to);
+                    switchedAt = clock.Elapsed;
+                    Console.WriteLine($"  {switchedAt.Value.TotalSeconds,6:F2} s: exposure set to {to / 1000.0:0.###} ms mid-stream: {set}, after {longFrames + shortFrames} frames");
+                    exposureUs = to;
+                }
+
+                var code = camera.GetVideoData(buffer, frameBytes, FrameWaitMs);
+                var now = clock.Elapsed;
+                if (code is CMOSErrorCode.Success)
+                {
+                    var interval = now - lastFrame;
+                    var isLong = interval.TotalMilliseconds > 500;
+                    if (isLong)
+                    {
+                        longFrames++;
+                    }
+                    else
+                    {
+                        shortFrames++;
+                    }
+
+                    if (switchedAt is not null)
+                    {
+                        framesSinceSwitch++;
+                    }
+
+                    // Every long frame, and the first few after a switch, which show what was in flight.
+                    if (isLong || (switchedAt is not null && framesSinceSwitch <= 3))
+                    {
+                        Console.WriteLine($"  {now.TotalSeconds,6:F2} s: {(isLong ? "long" : "short")} frame, {interval.TotalSeconds:F2} s after the last, mean {MeanAdu(buffer, false):F1} ADU");
+                    }
+
+                    lastFrame = now;
+                    continue;
+                }
+
+                if (code is CMOSErrorCode.Timeout)
+                {
+                    continue;
+                }
+
+                faults++;
+                var restart = Stopwatch.StartNew();
+                _ = camera.StopVideoCapture();
+                var started = camera.StartVideoCapture();
+                Console.WriteLine($"  {now.TotalSeconds,6:F2} s: FAULT {code}, {(now - lastFrame).TotalSeconds:F2} s after the last frame; stream restarted ({started}) in {restart.Elapsed.TotalMilliseconds:F0} ms");
+                lastFrame = clock.Elapsed;
+            }
+
+            var stopClock = Stopwatch.StartNew();
+            var stopped = camera.StopVideoCapture();
+            var longPhase = startUs >= LongUs
+                ? (switchedAt ?? end) - TimeSpan.Zero
+                : end - (switchedAt ?? end);
+            var due = (int)(longPhase.TotalMilliseconds * 1000 / Math.Max(startUs, switchToUs ?? 0));
+            var shortPhase = startUs < LongUs ? (switchedAt ?? end) : end - (switchedAt ?? end);
+            var passed = faults == 0 && longFrames >= due - 1 && (shortPhase < TimeSpan.FromSeconds(1) || shortFrames > 0);
+            Console.WriteLine($"  {label}: {longFrames} long frames in {longPhase.TotalSeconds:F1} s (about {due} due), {shortFrames} short frames in {shortPhase.TotalSeconds:F1} s, "
+                + $"{faults} faults; stop {stopped} in {stopClock.Elapsed.TotalMilliseconds:F0} ms  {(passed ? "PASS" : "FAIL")}");
+            return passed;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
         }
     }
 

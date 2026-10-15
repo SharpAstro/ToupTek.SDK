@@ -93,6 +93,13 @@ internal sealed unsafe partial class ToupcamSession
     // trigger mode may still be queued in the SDK, and an exposure must not read one as its own.
     private int _drainBeforeTrigger;
 
+    // The exposure the SDK's no-packet and no-frame timeouts are armed for while a stream runs, and a
+    // SHORTER one waiting to be armed once the frames of the longer one are through (0: none). Set on
+    // the caller's threads only, never in the SDK's callback.
+    private uint _videoTimeoutExposureUs;
+    private uint _videoPendingTimeoutUs;
+    private long _videoPendingAfterArrivals;
+
     internal bool IsStreaming => Volatile.Read(ref _videoActive) != 0;
 
     /// <summary>
@@ -135,6 +142,9 @@ internal sealed unsafe partial class ToupcamSession
         Volatile.Write(ref _state, StateIdle);
         Volatile.Write(ref _drainBeforeTrigger, 0);
 
+        uint exposureUs;
+        ArmVideoTimeouts(Succeeded(Api.GetExpoTime(Handle, &exposureUs)) ? exposureUs : 0);
+
         lock (_videoGate)
         {
             _videoFrameBytes = frameBytes;
@@ -162,10 +172,59 @@ internal sealed unsafe partial class ToupcamSession
                 Volatile.Write(ref _videoActive, 0);
             }
 
+            ArmTriggerTimeouts();
             return ToupcamCamera.ToDALError(hr);
         }
 
         return CMOSErrorCode.Success;
+    }
+
+    /// <summary>
+    /// Arms the SDK's no-packet and no-frame timeouts for a stream at <paramref name="exposureUs"/>: the
+    /// exposure plus the margins trigger mode uses (<see cref="NOPACKET_TIMEOUT_MS"/>,
+    /// <see cref="NOFRAME_TIMEOUT_MS"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>In video the timeouts count from the last packet</b>, unlike a triggered exposure, where
+    /// the SDK arms them against when the frame is due. Measured on the G3M678M with trigger mode's
+    /// 1 s and 2 s left armed: a stream at a 3 s exposure faulted on <c>NOPACKETTIMEOUT</c> 1.03 to
+    /// 1.05 s after every start and never delivered a frame (0 in 30 s, five faults), and a 5 ms stream
+    /// switched to 3 s did the same after the one frame already in flight. The camera sends nothing
+    /// while it exposes, so the timeouts have to outlast the exposure.</para>
+    /// </remarks>
+    private void ArmVideoTimeouts(uint exposureUs)
+    {
+        var exposureMs = (int)Math.Min(exposureUs / 1000u, (uint)(int.MaxValue - NOFRAME_TIMEOUT_MS));
+        _ = Api.PutOption(Handle, OPTION_NOPACKET_TIMEOUT, exposureMs + NOPACKET_TIMEOUT_MS);
+        _ = Api.PutOption(Handle, OPTION_NOFRAME_TIMEOUT, exposureMs + NOFRAME_TIMEOUT_MS);
+        _videoTimeoutExposureUs = exposureUs;
+        Volatile.Write(ref _videoPendingTimeoutUs, 0u);
+    }
+
+    /// <summary>
+    /// The exposure changed while a stream may be running: a longer one is armed at once, a shorter one
+    /// only once two more frames have arrived.
+    /// </summary>
+    /// <remarks>
+    /// The frame the camera is exposing when the exposure falls is still a long one, so arming the
+    /// shorter timeouts at once would call it a stall. Two frames on, the long ones are through; the
+    /// reader arms the shorter timeouts then (<see cref="GetVideoFrame"/>), on its own thread.
+    /// </remarks>
+    internal void OnExposureChanged(uint exposureUs)
+    {
+        if (!IsStreaming)
+        {
+            return;
+        }
+
+        if (exposureUs >= _videoTimeoutExposureUs)
+        {
+            ArmVideoTimeouts(exposureUs);
+            return;
+        }
+
+        _videoPendingAfterArrivals = Volatile.Read(ref _videoArrivals) + 2;
+        Volatile.Write(ref _videoPendingTimeoutUs, exposureUs);
     }
 
     /// <summary>
@@ -201,6 +260,8 @@ internal sealed unsafe partial class ToupcamSession
         {
             Volatile.Write(ref _videoActive, 0);
         }
+
+        ArmTriggerTimeouts();
 
         _ = Api.PutOption(Handle, OPTION_FLUSH, FLUSH_SOFT);
         Volatile.Write(ref _drainBeforeTrigger, 1);
@@ -256,6 +317,13 @@ internal sealed unsafe partial class ToupcamSession
         if (bufferSize < _videoFrameBytes)
         {
             return CMOSErrorCode.BufferTooSmall;
+        }
+
+        // A shorter exposure's timeouts, once the longer one's frames are through (OnExposureChanged).
+        if (Volatile.Read(ref _videoPendingTimeoutUs) is var pending and not 0
+            && Volatile.Read(ref _videoArrivals) >= _videoPendingAfterArrivals)
+        {
+            ArmVideoTimeouts(pending);
         }
 
         var deadline = Environment.TickCount64 + Math.Max(0, waitMs);
