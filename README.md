@@ -264,9 +264,11 @@ dotnet run --project tools/ToupcamVideoProbe -c Release -- longexp --exposure-ms
 
 - **rate**: 640x480 at (1716, 546), gain 2252, 1 s settling then 60 s counted, each run on a fresh
   open: three in 8 bits at 5 ms, one in 16 bits, one in 8 bits at 2 ms. Per run: frames, fps by
-  `Stopwatch`, `get_FrameRate`, `TryGetDroppedFrames`, stalls. Passes at 190 fps (90 in 16 bits), no
-  stall, and at most one frame dropped in 1,800: SharpCap's on this camera (about 55 in nearly
-  100,000, the night of 2026-10-07).
+  `Stopwatch`, `get_FrameRate`, `TryGetDroppedFrames`, stalls. Passes at 190 fps (90 in 16 bits) and
+  no stall; the 5 ms runs also at most one frame dropped in 1,800, SharpCap's on this camera (about 55
+  in nearly 100,000, the night of 2026-10-07). The 2 ms run's drops are printed, not judged: its bar
+  is the rate, about 200, and at 2 ms the readout sets the rate, where this camera loses frames on its
+  own (1 in 925 to 1 in 22,809 on 2026-10-15, at every speed level).
 - **pan**: ten 64 px `SetStartPosition` moves mid-stream; the shift of the picture is measured by
   matching 16-frame averages (a capped camera's fixed pattern is enough), and the camera's loss per
   pan by its own count.
@@ -288,7 +290,7 @@ dotnet run --project tools/ToupcamVideoProbe -c Release -- longexp --exposure-ms
 Exit code 0 when everything passed, 1 when anything failed, 2 with no camera. Measured 2026-10-15 on
 the G3M678M, straight after a reset (11:17): **196.8 fps** in 8 bits at 5 ms on three fresh opens
 (`get_FrameRate` 197.2 to 197.4), **98.3** in 16 bits, each with 0 dropped and no stall over 60 s;
-**200.4** at 2 ms with 13 dropped (1 in 925, short of the bar; garbage frame info, above); ten pans at
+**200.4** at 2 ms with 13 dropped (1 in 925, reported, not judged; garbage frame info, above); ten pans at
 33 ms each, one frame lost apiece; no stall in 20 cycles; the single exposures each reading their own
 frame. See "Stalls under video" for the periods when it stalled.
 
