@@ -85,7 +85,7 @@ internal sealed unsafe partial class ToupcamSession
                 (min, max) = (lo, hi);
                 return true;
             }
-            case CMOSControlType.Brightness when Has(FLAG_BLACKLEVEL):
+            case CMOSControlType.BlackLevel when Has(FLAG_BLACKLEVEL):
                 // TOUPCAM_BLACKLEVELn_MAX is 31 x 2^(n - 8): the offset is a count in the CURRENT
                 // output's units, so it scales with the bit depth the stream runs at.
                 (min, max) = (0, 31 << (CurrentBitDepth - 8));
@@ -150,7 +150,7 @@ internal sealed unsafe partial class ToupcamSession
                 value = percent;
                 break;
             }
-            case CMOSControlType.Brightness when Has(FLAG_BLACKLEVEL):
+            case CMOSControlType.BlackLevel when Has(FLAG_BLACKLEVEL):
                 hr = GetOption(OPTION_BLACKLEVEL, out value);
                 break;
             case CMOSControlType.TemperatureDeci:
@@ -204,7 +204,7 @@ internal sealed unsafe partial class ToupcamSession
         {
             CMOSControlType.Exposure when value >= 0 => Api.PutExpoTime(Handle, (uint)value),
             CMOSControlType.Gain when value is >= 0 and <= ushort.MaxValue => Api.PutExpoAGain(Handle, (ushort)value),
-            CMOSControlType.Brightness when Has(FLAG_BLACKLEVEL) => Api.PutOption(Handle, OPTION_BLACKLEVEL, value),
+            CMOSControlType.BlackLevel when Has(FLAG_BLACKLEVEL) => Api.PutOption(Handle, OPTION_BLACKLEVEL, value),
             CMOSControlType.TargetTemperature when Has(FLAG_TEC_ONOFF) => Api.PutOption(Handle, OPTION_TECTARGET, value * 10),
             CMOSControlType.CoolerOn when Has(FLAG_TEC_ONOFF) => Api.PutOption(Handle, OPTION_TEC, value != 0 ? 1 : 0),
             CMOSControlType.FanOn when Has(FLAG_FAN) => Api.PutOption(Handle, OPTION_FAN, value),
