@@ -82,6 +82,12 @@ internal static class ToupcamConstants
     /// <summary><c>TOUPCAM_FRAMEINFO_FLAG_SEQ</c>: the frame info's <c>seq</c> is valid.</summary>
     internal const uint FRAMEINFO_FLAG_SEQ = 0x00000001;
 
+    /// <summary>Byte offset of <c>width</c> in <c>ToupcamFrameInfoV3</c>, the first field.</summary>
+    internal const int FRAMEINFO_WIDTH_OFFSET = 0;
+
+    /// <summary>Byte offset of <c>height</c> in <c>ToupcamFrameInfoV3</c>.</summary>
+    internal const int FRAMEINFO_HEIGHT_OFFSET = 4;
+
     /// <summary>Byte offset of <c>flag</c> in <c>ToupcamFrameInfoV3</c> (after width and height).</summary>
     internal const int FRAMEINFO_FLAG_OFFSET = 8;
 

@@ -305,6 +305,10 @@ internal sealed unsafe partial class ToupcamSession
     {
         var hr = Api.Trigger(Handle, 0);
         Volatile.Write(ref _state, StateIdle);
+
+        // The cancelled exposure's frame may still arrive after this: the state is Idle, so nothing marks it ready,
+        // and without this the next BeginExposure would not drain it. It is drained there, into the sensor-sized scratch.
+        Volatile.Write(ref _drainBeforeTrigger, 1);
         return hr;
     }
 
@@ -317,19 +321,69 @@ internal sealed unsafe partial class ToupcamSession
     };
 
     /// <summary>Copies the finished frame into <paramref name="buffer"/> and returns to idle.</summary>
+    /// <remarks>
+    /// <para>The caller sized <paramref name="buffer"/> for the window and bit depth in force NOW
+    /// (<see cref="TryGetFinalSize"/>), but a frame still queued or in transfer may have been taken under an
+    /// earlier, larger one (a cancelled exposure's frame landing late, a frame arriving after the flush in
+    /// <see cref="ApplyRoi"/>). Pulled straight into the caller's buffer it would write past the end
+    /// (SharpAstro/tianwen#1760). So it is pulled into a scratch sized for the largest frame the sensor delivers,
+    /// its width and height (the head of <c>ToupcamFrameInfoV4</c>) are checked against the current final size, and
+    /// only a match is copied; a mismatch is dropped and the next queued frame is tried. Whatever the camera does,
+    /// and whenever the frame lands, nothing is written past the caller's buffer.</para>
+    /// <para>The caller has checked <paramref name="buffer"/> holds the current final size at the current bit
+    /// depth, which is exactly what is copied.</para>
+    /// </remarks>
     internal int PullFrame(nint buffer)
     {
-        // pInfo is not optional in every build of the SDK, so it gets somewhere to write.
-        // ToupcamFrameInfoV4 is ~104 bytes; the slack is deliberate.
-        var info = stackalloc byte[512];
-        var hr = Api.PullImageV4(Handle, (void*)buffer, 0, 0, 0, info);
-        if (Succeeded(hr))
+        if (!TryGetFinalSize(out var width, out var height))
         {
-            Volatile.Write(ref _state, StateIdle);
+            return E_FAIL_PULL;
         }
 
-        return hr;
+        var (maxW, maxH) = Entry.Model.Resolutions.Length > 0 ? Entry.Model.Resolutions[0] : (0, 0);
+        var bytes = (long)width * height * (Bits16 ? 2 : 1);
+        if (maxW <= 0 || maxH <= 0 || bytes <= 0 || bytes > (long)maxW * maxH * 2)
+        {
+            return E_FAIL_PULL;
+        }
+
+        var scratch = NativeMemory.Alloc((nuint)maxW * (nuint)maxH * 2);
+        try
+        {
+            // pInfo is not optional in every build of the SDK, so it gets somewhere to write.
+            // ToupcamFrameInfoV4 is ~104 bytes; the slack is deliberate.
+            var info = stackalloc byte[512];
+            // Bounded: a queue holds a handful of frames, and a stale one is dropped, not kept.
+            for (var attempt = 0; attempt < MaxStaleFramesDropped; attempt++)
+            {
+                new Span<byte>(info, 512).Clear();
+                var hr = Api.PullImageV4(Handle, scratch, 0, 0, 0, info);
+                if (!Succeeded(hr))
+                {
+                    return hr;
+                }
+
+                if (*(uint*)(info + FRAMEINFO_WIDTH_OFFSET) == (uint)width && *(uint*)(info + FRAMEINFO_HEIGHT_OFFSET) == (uint)height)
+                {
+                    Buffer.MemoryCopy(scratch, (void*)buffer, bytes, bytes);
+                    Volatile.Write(ref _state, StateIdle);
+                    return hr;
+                }
+            }
+
+            return E_FAIL_PULL;
+        }
+        finally
+        {
+            NativeMemory.Free(scratch);
+        }
     }
+
+    /// <summary>A pull that failed here, before or after the SDK was asked: the generic failure HRESULT.</summary>
+    private const int E_FAIL_PULL = unchecked((int)0x80004005);
+
+    /// <summary>The most queued frames of a wrong size one read drops before it gives up.</summary>
+    private const int MaxStaleFramesDropped = 16;
 
     /// <summary>The frame size the SDK will deliver, after ROI and binning.</summary>
     internal bool TryGetFinalSize(out int width, out int height)
@@ -353,7 +407,8 @@ internal sealed unsafe partial class ToupcamSession
     /// a timeout above this layer), its frame is still waiting, and without this the following trigger's
     /// read would hand back the OLD frame under the new exposure's metadata: a plausible picture with
     /// the wrong exposure time, not an error. The first exposure after a video stream drains too, for a
-    /// frame the camera sent after it left video mode.
+    /// frame the camera sent after it left video mode, and the first one after a cancelled exposure, whose frame can
+    /// land after the cancel (the state is Idle then, so the Ready check alone would not see it).
     /// </remarks>
     private void DrainPendingFrames()
     {
@@ -364,8 +419,8 @@ internal sealed unsafe partial class ToupcamSession
         }
 
         // Sized for the largest frame the sensor delivers (whole sensor, unbinned, 16 bits), not the window now: a frame
-        // drained here may have been taken under an earlier, larger window (a cancelled exposure's frame arriving late),
-        // and pulled into a scratch sized for the current one it would write past the end (SharpAstro/tianwen#1760).
+        // drained here may have been taken under an earlier, larger window (a cancelled exposure's frame arriving late,
+        // reached through the drain flag CancelExposure sets), and pulled into a scratch sized for the current one it would write past the end (SharpAstro/tianwen#1760).
         var (maxW, maxH) = Entry.Model.Resolutions.Length > 0 ? Entry.Model.Resolutions[0] : (0, 0);
         if (maxW <= 0 || maxH <= 0)
         {
@@ -391,6 +446,10 @@ internal sealed unsafe partial class ToupcamSession
     /// <summary>Sets bin, bit depth and size together, then re-applies the ROI in sensor coordinates.</summary>
     internal int Configure(int width, int height, int bin, bool bits16)
     {
+        // A change of bin or bit depth changes the byte size of every frame, so a frame queued before it is as unsafe to
+        // read into a buffer sized after it as one from a larger window is; it is flushed even when put_Roi is refused
+        // (E_INVALIDARG, see ApplyRoi) or an early return skips ApplyRoi, as the new Bin/Bits16 are already committed.
+        var formatChanged = false;
         if (bin != Bin)
         {
             var hr = Api.PutOption(Handle, OPTION_BINNING, bin == 1 ? 1 : BINNING_AVERAGE | bin);
@@ -400,6 +459,7 @@ internal sealed unsafe partial class ToupcamSession
             }
 
             Bin = bin;
+            formatChanged = true;
         }
 
         if (bits16 != Bits16)
@@ -407,15 +467,21 @@ internal sealed unsafe partial class ToupcamSession
             var hr = Api.PutOption(Handle, OPTION_BITDEPTH, bits16 ? 1 : 0);
             if (!Succeeded(hr))
             {
+                if (formatChanged)
+                {
+                    FlushQueuedFrames();
+                }
+
                 return hr;
             }
 
             Bits16 = bits16;
+            formatChanged = true;
         }
 
         RoiWidth = width;
         RoiHeight = height;
-        return ApplyRoi();
+        return ApplyRoi(formatChanged);
     }
 
     internal int SetStart(int x, int y)
@@ -430,7 +496,7 @@ internal sealed unsafe partial class ToupcamSession
     /// to the original resolution, "even that the image has been ... digital binning". Offsets and sizes
     /// must be even and at least 8, so they are rounded down to even here rather than refused.
     /// </summary>
-    private int ApplyRoi()
+    private int ApplyRoi(bool formatChanged = false)
     {
         // The SIZE wins and the start follows it. DALCameraDriver sets the format before the start, so
         // a full-size request arriving after a sub-frame at (100, 50) would otherwise put a 3840-wide
@@ -446,19 +512,32 @@ internal sealed unsafe partial class ToupcamSession
         var hr = Api.PutRoi(Handle, x, y, w, h);
 
         // A frame queued under the earlier window is that window's size, and the next read sizes its buffer for the new
-        // one (GetDataAfterExposure, DrainPendingFrames): pulled there, a larger old frame writes past the end
-        // (SharpAstro/tianwen#1760). Whether put_Roi flushes on its own is undocumented and unmeasured, so the library's
-        // cached frames are discarded here, a soft flush as StartVideo and StopVideo use. Not while streaming: a pan keeps
-        // the stream's size, its ring is sized for it, and a pan's backlog is the settle's to skip (IsUnderVideoRoi).
-        if (Succeeded(hr) && !IsStreaming)
+        // one (GetDataAfterExposure, DrainPendingFrames): a larger old frame must not be read into it
+        // (SharpAstro/tianwen#1760). PullFrame checks every frame's size before it copies, so this flush is no longer the
+        // only guard, just what keeps stale frames from being pulled at all. Whether put_Roi flushes on its own is
+        // undocumented and unmeasured, so the library's cached frames are discarded here, a soft flush as StartVideo and
+        // StopVideo use. Also when put_Roi was refused but the bin or bit depth changed (formatChanged). Not while
+        // streaming: a pan keeps the stream's size, its ring is sized for it, and a pan's backlog is the settle's to skip
+        // (IsUnderVideoRoi).
+        if (Succeeded(hr) || formatChanged)
         {
-            _ = Api.PutOption(Handle, OPTION_FLUSH, FLUSH_SOFT);
-
-            // A finished frame nobody read went with the flush: idle, not ready, so no read asks for it.
-            _ = Interlocked.CompareExchange(ref _state, StateIdle, StateReady);
+            FlushQueuedFrames();
         }
 
         return hr;
+    }
+
+    /// <summary>Discards the library's cached frames, and a finished frame nobody read goes with them: idle, not ready,
+    /// so no read asks for it. Not while streaming (see <see cref="ApplyRoi"/>).</summary>
+    private void FlushQueuedFrames()
+    {
+        if (IsStreaming)
+        {
+            return;
+        }
+
+        _ = Api.PutOption(Handle, OPTION_FLUSH, FLUSH_SOFT);
+        _ = Interlocked.CompareExchange(ref _state, StateIdle, StateReady);
     }
 
     // ---- Events -------------------------------------------------------------------------------------
