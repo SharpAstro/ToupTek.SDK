@@ -367,11 +367,16 @@ internal sealed unsafe partial class ToupcamSession
                 var hr = Api.PullImageV4(Handle, scratch, 0, 0, 0, info);
                 if (!Succeeded(hr))
                 {
-                    return hr;
+                    // E_INVALIDARG is this method's own signal for "larger than the caller's buffer" (above), so a real
+                    // E_INVALIDARG from the SDK is reported as E_FAIL: the caller must not call it BufferTooSmall.
+                    return hr == E_INVALIDARG ? E_FAIL : hr;
                 }
 
                 // Not yet measured on a camera: that a CURRENT frame reports exactly the get_FinalSize width and height
                 // at bin 1, 2 and 3 and on a sub-window. If a body reports other dimensions, every read drops its good frame.
+                // If a body does report other dimensions, the good frame is dropped here, the next pull finds the queue
+                // empty and returns E_PENDING, which the caller maps to ExposureInProgress: a read that never completes,
+                // not GeneralError. That is the symptom to look for in the bench check.
                 // The info carries no bit depth, so a late frame at the other depth is only covered by the flush.
                 if (*(uint*)(info + FRAMEINFO_WIDTH_OFFSET) == (uint)width && *(uint*)(info + FRAMEINFO_HEIGHT_OFFSET) == (uint)height)
                 {
