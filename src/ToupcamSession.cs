@@ -358,12 +358,21 @@ internal sealed unsafe partial class ToupcamSession
     private void DrainPendingFrames()
     {
         var afterVideo = Interlocked.Exchange(ref _drainBeforeTrigger, 0) != 0;
-        if ((Volatile.Read(ref _state) is not StateReady && !afterVideo) || !TryGetFinalSize(out var w, out var h))
+        if (Volatile.Read(ref _state) is not StateReady && !afterVideo)
         {
             return;
         }
 
-        var scratch = NativeMemory.Alloc((nuint)(w * h * (Bits16 ? 2 : 1)));
+        // Sized for the largest frame the sensor delivers (whole sensor, unbinned, 16 bits), not the window now: a frame
+        // drained here may have been taken under an earlier, larger window (a cancelled exposure's frame arriving late),
+        // and pulled into a scratch sized for the current one it would write past the end (SharpAstro/tianwen#1760).
+        var (maxW, maxH) = Entry.Model.Resolutions.Length > 0 ? Entry.Model.Resolutions[0] : (0, 0);
+        if (maxW <= 0 || maxH <= 0)
+        {
+            return;
+        }
+
+        var scratch = NativeMemory.Alloc((nuint)maxW * (nuint)maxH * 2);
         try
         {
             var info = stackalloc byte[512];
@@ -434,7 +443,22 @@ internal sealed unsafe partial class ToupcamSession
         var y = (uint)(RoiY * Bin) & ~1u;
         var w = (uint)(RoiWidth * Bin) & ~1u;
         var h = (uint)(RoiHeight * Bin) & ~1u;
-        return Api.PutRoi(Handle, x, y, w, h);
+        var hr = Api.PutRoi(Handle, x, y, w, h);
+
+        // A frame queued under the earlier window is that window's size, and the next read sizes its buffer for the new
+        // one (GetDataAfterExposure, DrainPendingFrames): pulled there, a larger old frame writes past the end
+        // (SharpAstro/tianwen#1760). Whether put_Roi flushes on its own is undocumented and unmeasured, so the library's
+        // cached frames are discarded here, a soft flush as StartVideo and StopVideo use. Not while streaming: a pan keeps
+        // the stream's size, its ring is sized for it, and a pan's backlog is the settle's to skip (IsUnderVideoRoi).
+        if (Succeeded(hr) && !IsStreaming)
+        {
+            _ = Api.PutOption(Handle, OPTION_FLUSH, FLUSH_SOFT);
+
+            // A finished frame nobody read went with the flush: idle, not ready, so no read asks for it.
+            _ = Interlocked.CompareExchange(ref _state, StateIdle, StateReady);
+        }
+
+        return hr;
     }
 
     // ---- Events -------------------------------------------------------------------------------------
