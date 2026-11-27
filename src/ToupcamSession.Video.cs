@@ -89,8 +89,9 @@ internal sealed unsafe partial class ToupcamSession
     private int _videoSequenceBroken;
     private uint _videoFault;
 
-    // Set by a stop, taken by the next exposure: frames that left the camera after the switch back to
-    // trigger mode may still be queued in the SDK, and an exposure must not read one as its own.
+    // Set by a video stop and by CancelExposure, taken by the next exposure: frames that left the camera after the
+    // switch back to trigger mode, or after a cancel, may still be queued in the SDK, and an exposure must not read
+    // one as its own.
     private int _drainBeforeTrigger;
 
     // The exposure the SDK's no-packet and no-frame timeouts are armed for while a stream runs, and a

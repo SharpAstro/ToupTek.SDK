@@ -388,7 +388,7 @@ public readonly struct ToupcamCamera : ICMOSNativeInterface
 
         return (long)width * height * (session.Bits16 ? 2 : 1) > bufferSize
             ? CMOSErrorCode.BufferTooSmall
-            : ToDALError(session.PullFrame(buffer));
+            : ToDALError(session.PullFrame(buffer, bufferSize), CMOSErrorCode.BufferTooSmall);
     }
 
     // ---- Video ----------------------------------------------------------------------------------

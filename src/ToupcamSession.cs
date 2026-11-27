@@ -330,21 +330,28 @@ internal sealed unsafe partial class ToupcamSession
     /// its width and height (the head of <c>ToupcamFrameInfoV4</c>) are checked against the current final size, and
     /// only a match is copied; a mismatch is dropped and the next queued frame is tried. Whatever the camera does,
     /// and whenever the frame lands, nothing is written past the caller's buffer.</para>
-    /// <para>The caller has checked <paramref name="buffer"/> holds the current final size at the current bit
-    /// depth, which is exactly what is copied.</para>
+    /// <para>The copy length is read here again (the caller's check used an earlier read), and Configure writes
+    /// Bin, the window and Bits16 one by one without a lock, so a window or depth change on another thread between
+    /// the two reads could grow it. <paramref name="bufferSize"/> caps it: a larger frame is refused with
+    /// <c>E_INVALIDARG</c> (the caller maps that to BufferTooSmall), never copied.</para>
     /// </remarks>
-    internal int PullFrame(nint buffer)
+    internal int PullFrame(nint buffer, int bufferSize)
     {
         if (!TryGetFinalSize(out var width, out var height))
         {
-            return E_FAIL_PULL;
+            return E_FAIL;
         }
 
         var (maxW, maxH) = Entry.Model.Resolutions.Length > 0 ? Entry.Model.Resolutions[0] : (0, 0);
         var bytes = (long)width * height * (Bits16 ? 2 : 1);
         if (maxW <= 0 || maxH <= 0 || bytes <= 0 || bytes > (long)maxW * maxH * 2)
         {
-            return E_FAIL_PULL;
+            return E_FAIL;
+        }
+
+        if (bytes > bufferSize)
+        {
+            return E_INVALIDARG;
         }
 
         var scratch = NativeMemory.Alloc((nuint)maxW * (nuint)maxH * 2);
@@ -363,6 +370,9 @@ internal sealed unsafe partial class ToupcamSession
                     return hr;
                 }
 
+                // Not yet measured on a camera: that a CURRENT frame reports exactly the get_FinalSize width and height
+                // at bin 1, 2 and 3 and on a sub-window. If a body reports other dimensions, every read drops its good frame.
+                // The info carries no bit depth, so a late frame at the other depth is only covered by the flush.
                 if (*(uint*)(info + FRAMEINFO_WIDTH_OFFSET) == (uint)width && *(uint*)(info + FRAMEINFO_HEIGHT_OFFSET) == (uint)height)
                 {
                     Buffer.MemoryCopy(scratch, (void*)buffer, bytes, bytes);
@@ -371,16 +381,13 @@ internal sealed unsafe partial class ToupcamSession
                 }
             }
 
-            return E_FAIL_PULL;
+            return E_FAIL;
         }
         finally
         {
             NativeMemory.Free(scratch);
         }
     }
-
-    /// <summary>A pull that failed here, before or after the SDK was asked: the generic failure HRESULT.</summary>
-    private const int E_FAIL_PULL = unchecked((int)0x80004005);
 
     /// <summary>The most queued frames of a wrong size one read drops before it gives up.</summary>
     private const int MaxStaleFramesDropped = 16;
@@ -412,8 +419,8 @@ internal sealed unsafe partial class ToupcamSession
     /// </remarks>
     private void DrainPendingFrames()
     {
-        var afterVideo = Interlocked.Exchange(ref _drainBeforeTrigger, 0) != 0;
-        if (Volatile.Read(ref _state) is not StateReady && !afterVideo)
+        var drainFlagged = Interlocked.Exchange(ref _drainBeforeTrigger, 0) != 0;
+        if (Volatile.Read(ref _state) is not StateReady && !drainFlagged)
         {
             return;
         }
